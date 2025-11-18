@@ -5,6 +5,13 @@ import requests
 import logging
 import uuid
 import math
+import os
+import json
+import base64
+from urllib.parse import urlparse
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
 
 class AbstractTradingAPI(abc.ABC):
     @abc.abstractmethod
@@ -30,44 +37,87 @@ class AbstractTradingAPI(abc.ABC):
 class KalshiTradingAPI(AbstractTradingAPI):
     def __init__(
         self,
-        email: str,
-        password: str,
+        access_key: str,
+        private_key: str,
         market_ticker: str,
         base_url: str,
         logger: logging.Logger,
     ):
-        self.email = email
-        self.password = password
+        self.access_key = access_key
         self.market_ticker = market_ticker
-        self.token = None
-        self.member_id = None
         self.logger = logger
         self.base_url = base_url
-        self.login()
-
-    def login(self):
-        url = f"{self.base_url}/login"
-        data = {"email": self.email, "password": self.password}
-        response = requests.post(url, json=data)
-        response.raise_for_status()
-        result = response.json()
-        self.token = result["token"]
-        self.member_id = result.get("member_id")
-        self.logger.info("Successfully logged in")
+        # Extract the path prefix from base_url (e.g., "/trade-api/v2")
+        parsed = urlparse(base_url)
+        self.path_prefix = parsed.path if parsed.path else "/trade-api/v2"
+        
+        # Load private key - handle both file path and key content
+        if os.path.isfile(private_key):
+            with open(private_key, 'rb') as f:
+                private_key_data = f.read()
+        else:
+            # Handle private key from environment variable
+            # It might have escaped newlines (\n) or actual newlines
+            if isinstance(private_key, str):
+                # Replace escaped newlines with actual newlines
+                private_key_str = private_key.replace('\\n', '\n')
+                # Ensure it starts with proper PEM header
+                if not private_key_str.strip().startswith('-----BEGIN'):
+                    self.logger.error("Private key doesn't appear to be in PEM format (should start with -----BEGIN)")
+                private_key_data = private_key_str.encode('utf-8')
+            else:
+                private_key_data = private_key
+        
+        try:
+            self.private_key_obj = serialization.load_pem_private_key(
+                private_key_data,
+                password=None,
+                backend=default_backend()
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to load private key: {e}")
+            self.logger.error("Make sure your private key is in PEM format and properly formatted.")
+            self.logger.error("If storing in .env file, use \\n for newlines or store the key in a separate file.")
+            raise
+        
+        self.logger.info("Kalshi API initialized with API key authentication")
 
     def logout(self):
-        if self.token:
-            url = f"{self.base_url}/logout"
-            headers = self.get_headers()
-            response = requests.post(url, headers=headers)
-            response.raise_for_status()
-            self.token = None
-            self.member_id = None
-            self.logger.info("Successfully logged out")
+        # API key authentication doesn't require explicit logout
+        self.logger.info("Logout called (no-op for API key authentication)")
 
-    def get_headers(self):
+    def _sign_request(self, method: str, path: str, timestamp: str, body: str = "") -> str:
+        """Sign a request using RSA-PSS with SHA256"""
+        # Strip query parameters from path before signing (per Kalshi API docs)
+        path_without_query = path.split('?')[0]
+        # Construct full path including API version prefix
+        full_path = f"{self.path_prefix}{path_without_query}"
+        # Create the string to sign: timestamp + method + path (body NOT included per Kalshi API)
+        string_to_sign = f"{timestamp}{method}{full_path}"
+        
+        # Sign using RSA-PSS with SHA256
+        signature = self.private_key_obj.sign(
+            string_to_sign.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        
+        # Return base64 encoded signature
+        return base64.b64encode(signature).decode('utf-8')
+
+    def get_headers(self, method: str = "GET", path: str = "", body: str = ""):
+        """Generate headers with API key authentication"""
+        timestamp = str(int(time.time() * 1000))  # Timestamp in milliseconds
+        
+        signature = self._sign_request(method, path, timestamp, body)
+        
         return {
-            "Authorization": f"Bearer {self.token}",
+            "KALSHI-ACCESS-KEY": self.access_key,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp,
+            "KALSHI-ACCESS-SIGNATURE": signature,
             "Content-Type": "application/json",
         }
 
@@ -75,12 +125,27 @@ class KalshiTradingAPI(AbstractTradingAPI):
         self, method: str, path: str, params: Dict = None, data: Dict = None
     ):
         url = f"{self.base_url}{path}"
-        headers = self.get_headers()
+        
+        # Prepare body for signing - sort keys for consistent ordering
+        body = ""
+        if data:
+            # Sort keys to ensure consistent JSON string for signing
+            body = json.dumps(data, separators=(',', ':'), sort_keys=True)
+        
+        # Get signed headers
+        headers = self.get_headers(method, path, body)
 
         try:
-            response = requests.request(
-                method, url, headers=headers, params=params, json=data
-            )
+            # For POST/PUT with body, send the exact JSON string we signed
+            if data and method in ['POST', 'PUT', 'PATCH']:
+                headers['Content-Type'] = 'application/json'
+                response = requests.request(
+                    method, url, headers=headers, params=params, data=body.encode('utf-8')
+                )
+            else:
+                response = requests.request(
+                    method, url, headers=headers, params=params, json=data if data else None
+                )
             self.logger.debug(f"Request URL: {response.url}")
             self.logger.debug(f"Request headers: {response.request.headers}")
             self.logger.debug(f"Request params: {params}")

@@ -14,14 +14,14 @@ def load_config(config_file):
 
 def create_api(api_config, logger):
     return KalshiTradingAPI(
-        email=os.getenv("KALSHI_EMAIL"),
-        password=os.getenv("KALSHI_PASSWORD"),
+        access_key=os.getenv("KALSHI_ACCESS_KEY"),
+        private_key=os.getenv("KALSHI_PRIVATE_KEY"),
         market_ticker=api_config['market_ticker'],
         base_url=os.getenv("KALSHI_BASE_URL"),
         logger=logger,
     )
 
-def create_market_maker(mm_config, api, logger):
+def create_market_maker(mm_config, api_config, api, logger):
     return AvellanedaMarketMaker(
         logger=logger,
         api=api,
@@ -34,7 +34,7 @@ def create_market_maker(mm_config, api, logger):
         min_spread=mm_config.get('min_spread', 0.01),
         position_limit_buffer=mm_config.get('position_limit_buffer', 0.1),
         inventory_skew_factor=mm_config.get('inventory_skew_factor', 0.01),
-        trade_side=mm_config.get('trade_side', 'yes')
+        trade_side=api_config.get('trade_side', 'yes')
     )
 
 def run_strategy(config_name: str, config: Dict):
@@ -65,7 +65,7 @@ def run_strategy(config_name: str, config: Dict):
     api = create_api(config['api'], logger)
 
     # Create market maker
-    market_maker = create_market_maker(config['market_maker'], api, logger)
+    market_maker = create_market_maker(config['market_maker'], config['api'], api, logger)
 
     try:
         # Run market maker
