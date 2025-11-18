@@ -75,6 +75,40 @@ CREATE TABLE IF NOT EXISTS position_history (
     FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
 );
 
+-- Discovery sessions: Track each market discovery run
+CREATE TABLE IF NOT EXISTS discovery_sessions (
+    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    total_markets INTEGER NOT NULL,
+    binary_markets INTEGER NOT NULL,
+    pre_filtered INTEGER NOT NULL,
+    scored INTEGER NOT NULL,
+    top_markets_count INTEGER NOT NULL,
+    configs_generated INTEGER NOT NULL,
+    model_version TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Discovered markets: Track individual market discoveries
+CREATE TABLE IF NOT EXISTS discovered_markets (
+    discovery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    title TEXT,
+    score REAL,
+    volume_24h REAL,
+    spread REAL,
+    mid_price REAL,
+    liquidity REAL,
+    open_interest INTEGER,
+    reasons TEXT,  -- JSON array of scoring reasons
+    generated_config TEXT,  -- JSON of generated config
+    selected_for_trading BOOLEAN NOT NULL DEFAULT 0,
+    trade_side TEXT,  -- 'yes', 'no', or NULL if not selected
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES discovery_sessions(session_id) ON DELETE CASCADE
+);
+
 -- Indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_run_id ON market_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_timestamp ON market_snapshots(timestamp);
@@ -87,4 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_position_history_run_id ON position_history(run_i
 CREATE INDEX IF NOT EXISTS idx_position_history_timestamp ON position_history(timestamp);
 CREATE INDEX IF NOT EXISTS idx_strategy_runs_strategy_name ON strategy_runs(strategy_name);
 CREATE INDEX IF NOT EXISTS idx_strategy_runs_start_time ON strategy_runs(start_time);
+CREATE INDEX IF NOT EXISTS idx_discovery_sessions_timestamp ON discovery_sessions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_discovered_markets_session_id ON discovered_markets(session_id);
+CREATE INDEX IF NOT EXISTS idx_discovered_markets_ticker ON discovered_markets(ticker);
+CREATE INDEX IF NOT EXISTS idx_discovered_markets_selected ON discovered_markets(selected_for_trading);
 

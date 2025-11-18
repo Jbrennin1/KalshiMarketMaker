@@ -123,6 +123,44 @@ class AnalyticsDB:
                 )
             """)
             
+            # Discovery sessions
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS discovery_sessions (
+                    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    total_markets INTEGER NOT NULL,
+                    binary_markets INTEGER NOT NULL,
+                    pre_filtered INTEGER NOT NULL,
+                    scored INTEGER NOT NULL,
+                    top_markets_count INTEGER NOT NULL,
+                    configs_generated INTEGER NOT NULL,
+                    model_version TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Discovered markets
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS discovered_markets (
+                    discovery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    ticker TEXT NOT NULL,
+                    title TEXT,
+                    score REAL,
+                    volume_24h REAL,
+                    spread REAL,
+                    mid_price REAL,
+                    liquidity REAL,
+                    open_interest INTEGER,
+                    reasons TEXT,
+                    generated_config TEXT,
+                    selected_for_trading BOOLEAN NOT NULL DEFAULT 0,
+                    trade_side TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES discovery_sessions(session_id) ON DELETE CASCADE
+                )
+            """)
+            
             # Create indexes
             for idx_sql in [
                 "CREATE INDEX IF NOT EXISTS idx_market_snapshots_run_id ON market_snapshots(run_id)",
@@ -134,6 +172,10 @@ class AnalyticsDB:
                 "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)",
                 "CREATE INDEX IF NOT EXISTS idx_position_history_run_id ON position_history(run_id)",
                 "CREATE INDEX IF NOT EXISTS idx_position_history_timestamp ON position_history(timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_discovery_sessions_timestamp ON discovery_sessions(timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_discovered_markets_session_id ON discovered_markets(session_id)",
+                "CREATE INDEX IF NOT EXISTS idx_discovered_markets_ticker ON discovered_markets(ticker)",
+                "CREATE INDEX IF NOT EXISTS idx_discovered_markets_selected ON discovered_markets(selected_for_trading)",
             ]:
                 conn.execute(idx_sql)
             
@@ -405,4 +447,171 @@ class AnalyticsDB:
                     pass
             
             return filled_orders
+    
+    def create_discovery_session(
+        self,
+        total_markets: int,
+        binary_markets: int,
+        pre_filtered: int,
+        scored: int,
+        top_markets_count: int,
+        configs_generated: int,
+        model_version: Optional[str] = None
+    ) -> int:
+        """
+        Create a new discovery session and return session_id
+        
+        Args:
+            total_markets: Total markets discovered
+            binary_markets: Number of binary markets
+            pre_filtered: Number after pre-filtering
+            scored: Number of markets scored
+            top_markets_count: Number of top markets selected
+            configs_generated: Number of configs generated
+            model_version: Optional model version string
+            
+        Returns:
+            session_id: The ID of the created discovery session
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO discovery_sessions (
+                    timestamp, total_markets, binary_markets, pre_filtered,
+                    scored, top_markets_count, configs_generated, model_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                datetime.now().isoformat(),
+                total_markets,
+                binary_markets,
+                pre_filtered,
+                scored,
+                top_markets_count,
+                configs_generated,
+                model_version
+            ))
+            conn.commit()
+            session_id = cursor.lastrowid
+            self.logger.info(f"Created discovery session {session_id}")
+            return session_id
+    
+    def log_discovered_market(
+        self,
+        session_id: int,
+        ticker: str,
+        title: Optional[str],
+        score: Optional[float],
+        volume_24h: Optional[float],
+        spread: Optional[float],
+        mid_price: Optional[float],
+        liquidity: Optional[float],
+        open_interest: Optional[int],
+        reasons: Optional[List[str]],
+        generated_config: Optional[Dict],
+        selected_for_trading: bool = False,
+        trade_side: Optional[str] = None
+    ):
+        """
+        Log a discovered market with its score and generated config
+        
+        Args:
+            session_id: Discovery session ID
+            ticker: Market ticker
+            title: Market title
+            score: Profitability score
+            volume_24h: 24h volume in dollars
+            spread: Market spread in dollars
+            mid_price: Mid price
+            liquidity: Book liquidity in dollars
+            open_interest: Open interest
+            reasons: List of scoring reasons
+            generated_config: Generated config dict (if available)
+            selected_for_trading: Whether this market was selected for trading
+            trade_side: 'yes', 'no', or None
+        """
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO discovered_markets (
+                    session_id, ticker, title, score, volume_24h, spread,
+                    mid_price, liquidity, open_interest, reasons, generated_config,
+                    selected_for_trading, trade_side
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                session_id,
+                ticker,
+                title,
+                score,
+                volume_24h,
+                spread,
+                mid_price,
+                liquidity,
+                open_interest,
+                json.dumps(reasons) if reasons else None,
+                json.dumps(generated_config) if generated_config else None,
+                1 if selected_for_trading else 0,
+                trade_side
+            ))
+            conn.commit()
+            self.logger.debug(f"Logged discovered market: {ticker}")
+    
+    def get_discovery_session(self, session_id: int) -> Optional[Dict]:
+        """
+        Retrieve discovery session details
+        
+        Args:
+            session_id: Discovery session ID
+            
+        Returns:
+            Dictionary with session details or None if not found
+        """
+        with self.get_connection() as conn:
+            row = conn.execute("""
+                SELECT * FROM discovery_sessions WHERE session_id = ?
+            """, (session_id,)).fetchone()
+            
+            if row:
+                return dict(row)
+            return None
+    
+    def get_discovered_markets(self, session_id: int, selected_only: bool = False) -> List[Dict]:
+        """
+        Get all markets from a discovery session
+        
+        Args:
+            session_id: Discovery session ID
+            selected_only: If True, only return markets selected for trading
+            
+        Returns:
+            List of discovered market dictionaries
+        """
+        with self.get_connection() as conn:
+            if selected_only:
+                rows = conn.execute("""
+                    SELECT * FROM discovered_markets
+                    WHERE session_id = ? AND selected_for_trading = 1
+                    ORDER BY score DESC
+                """, (session_id,)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM discovered_markets
+                    WHERE session_id = ?
+                    ORDER BY score DESC
+                """, (session_id,)).fetchall()
+            
+            markets = []
+            for row in rows:
+                market = dict(row)
+                # Parse JSON fields
+                if market.get('reasons'):
+                    try:
+                        market['reasons'] = json.loads(market['reasons'])
+                    except:
+                        market['reasons'] = []
+                if market.get('generated_config'):
+                    try:
+                        market['generated_config'] = json.loads(market['generated_config'])
+                    except:
+                        market['generated_config'] = None
+                markets.append(market)
+            
+            return markets
 

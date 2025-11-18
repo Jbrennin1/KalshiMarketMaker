@@ -144,11 +144,13 @@ class KalshiTradingAPI(AbstractTradingAPI):
             if data and method in ['POST', 'PUT', 'PATCH']:
                 headers['Content-Type'] = 'application/json'
                 response = requests.request(
-                    method, url, headers=headers, params=params, data=body.encode('utf-8')
+                    method, url, headers=headers, params=params, data=body.encode('utf-8'),
+                    timeout=30  # 30 second timeout to prevent hanging
                 )
             else:
                 response = requests.request(
-                    method, url, headers=headers, params=params, json=data if data else None
+                    method, url, headers=headers, params=params, json=data if data else None,
+                    timeout=30  # 30 second timeout to prevent hanging
                 )
             self.logger.debug(f"Request URL: {response.url}")
             self.logger.debug(f"Request headers: {response.request.headers}")
@@ -289,6 +291,9 @@ class AvellanedaMarketMaker:
         trade_side: str = "yes",
         analytics_db: Optional[object] = None,
         run_id: Optional[int] = None,
+        config: Optional[Dict] = None,
+        extreme_band: str = "normal",
+        one_sided_quoting: bool = False,
     ):
         self.api = api
         self.logger = logger
@@ -299,15 +304,107 @@ class AvellanedaMarketMaker:
         self.max_position = max_position
         self.order_expiration = order_expiration
         self.min_spread = min_spread
+        self.max_spread = 0.50  # Maximum spread cap
         self.position_limit_buffer = position_limit_buffer
         self.inventory_skew_factor = inventory_skew_factor
         self.trade_side = trade_side
         self.analytics_db = analytics_db
         self.run_id = run_id
         self.last_position = None
+        self.config = config or {}
+        self.extreme_band = extreme_band
+        self.one_sided_quoting = one_sided_quoting
+        
+        # Throttling state
+        self.throttle_state = {
+            'spread_widened': {'count': 0, 'active': False},
+            'book_thin': {'count': 0, 'active': False},
+            'adverse_selection': {'count': 0, 'active': False}
+        }
+        
+        # Adverse selection tracking
+        self.fill_history = []  # List of (timestamp, action, price_change) tuples
+        
+        # Get throttling config
+        throttling_config = self.config.get('throttling', {})
+        self.trigger_threshold = throttling_config.get('trigger_threshold', 3)
+        self.recovery_threshold = throttling_config.get('recovery_threshold', 5)
+        self.max_spread_threshold = throttling_config.get('max_spread_threshold', 0.20)
+        self.spread_widen_ticks = throttling_config.get('spread_widen_ticks', 5)
+        self.min_book_depth = throttling_config.get('min_book_depth', 100)
+        self.book_thin_widen_ticks = throttling_config.get('book_thin_widen_ticks', 3)
+        self.adverse_selection_window = throttling_config.get('adverse_selection_window_seconds', 300)
+        self.adverse_selection_threshold = throttling_config.get('adverse_selection_threshold', 0.7)
+        
+        # Get risk horizon from config
+        as_config = self.config.get('as_model', {})
+        self.risk_horizon_seconds = as_config.get('risk_horizon_seconds', 3600)
+        self.min_total_spread = as_config.get('min_total_spread', 0.02)
+        self.max_total_spread = as_config.get('max_total_spread', 0.05)
+
+    def check_spread_widening(self, current_spread: float) -> bool:
+        """Check if spread has widened beyond threshold"""
+        return current_spread > self.max_spread_threshold
+    
+    def check_book_health(self, market_data: Dict) -> bool:
+        """Check if book depth is sufficient"""
+        # For now, use a simple heuristic based on bid/ask prices
+        # In full implementation, would fetch order book depth
+        bid = market_data.get(f"{self.trade_side}_bid", 0)
+        ask = market_data.get(f"{self.trade_side}_ask", 0)
+        spread = ask - bid
+        # If spread is very wide, assume book is thin
+        return spread < self.max_spread_threshold * 2
+    
+    def detect_adverse_selection(self) -> bool:
+        """Detect adverse selection: fills on wrong side of price moves"""
+        current_time = time.time()
+        # Remove old entries
+        self.fill_history = [(ts, a, pc) for ts, a, pc in self.fill_history 
+                            if current_time - ts < self.adverse_selection_window]
+        
+        if len(self.fill_history) < 5:
+            return False  # Not enough data
+        
+        # Count fills on wrong side of moves
+        wrong_side_count = 0
+        for _, action, price_change in self.fill_history:
+            # If we bought and price went down, or sold and price went up
+            if (action == 'buy' and price_change < 0) or (action == 'sell' and price_change > 0):
+                wrong_side_count += 1
+        
+        ratio = wrong_side_count / len(self.fill_history)
+        return ratio >= self.adverse_selection_threshold
+    
+    def update_throttle_state(self, check_name: str, is_bad: bool):
+        """Update throttle state with hysteresis"""
+        state = self.throttle_state[check_name]
+        
+        if is_bad:
+            state['count'] += 1
+            if state['count'] >= self.trigger_threshold and not state['active']:
+                state['active'] = True
+                self.logger.warning(f"THROTTLE_REASON={check_name.upper()} triggered for {self.api.market_ticker}")
+        else:
+            if state['active']:
+                state['count'] = max(0, state['count'] - 1)
+                if state['count'] == 0:
+                    # Need N consecutive good checks to recover
+                    recovery_count = getattr(self, f'_{check_name}_recovery_count', 0)
+                    recovery_count += 1
+                    setattr(self, f'_{check_name}_recovery_count', recovery_count)
+                    if recovery_count >= self.recovery_threshold:
+                        state['active'] = False
+                        setattr(self, f'_{check_name}_recovery_count', 0)
+                        self.logger.info(f"THROTTLE_REASON={check_name.upper()} recovered for {self.api.market_ticker}")
+            else:
+                state['count'] = max(0, state['count'] - 1)
+                setattr(self, f'_{check_name}_recovery_count', 0)
 
     def run(self, dt: float):
         start_time = time.time()
+        last_price = None
+        
         while time.time() - start_time < self.T:
             current_time = time.time() - start_time
             self.logger.info(f"Running Avellaneda market maker at {current_time:.2f}")
@@ -316,6 +413,24 @@ class AvellanedaMarketMaker:
             mid_price = mid_prices[self.trade_side]
             inventory = self.api.get_position()
             self.logger.info(f"Current mid price for {self.trade_side}: {mid_price:.4f}, Inventory: {inventory}")
+
+            # Check throttling conditions
+            current_spread = mid_prices[f"{self.trade_side}_ask"] - mid_prices[f"{self.trade_side}_bid"]
+            spread_widened = self.check_spread_widening(current_spread)
+            book_healthy = self.check_book_health(mid_prices)
+            adverse_selection = self.detect_adverse_selection()
+            
+            self.update_throttle_state('spread_widened', spread_widened)
+            self.update_throttle_state('book_thin', not book_healthy)
+            self.update_throttle_state('adverse_selection', adverse_selection)
+            
+            # Track price changes for adverse selection
+            if last_price is not None:
+                price_change = mid_price - last_price
+                # Store in fill history (will be populated when fills occur)
+                # For now, just track price changes
+                pass
+            last_price = mid_price
 
             reservation_price = self.calculate_reservation_price(mid_price, inventory, current_time)
             bid_price, ask_price = self.calculate_asymmetric_quotes(mid_price, inventory, current_time)
@@ -359,18 +474,51 @@ class AvellanedaMarketMaker:
         reservation_price = self.calculate_reservation_price(mid_price, inventory, t)
         base_spread = self.calculate_optimal_spread(t, inventory)
         
+        # Apply throttling adjustments if active
+        spread_adjustment_multiplier = 1.0
+        if self.throttle_state['spread_widened']['active']:
+            spread_adjustment_multiplier += self.spread_widen_ticks * 0.01  # Widen by N ticks
+        if self.throttle_state['book_thin']['active']:
+            spread_adjustment_multiplier += self.book_thin_widen_ticks * 0.01
+        
+        base_spread *= spread_adjustment_multiplier
+        
         position_ratio = inventory / self.max_position
-        spread_adjustment = base_spread * abs(position_ratio) * 3
+        inventory_adjustment = base_spread * abs(position_ratio) * 3
         
         if inventory > 0:
-            bid_spread = base_spread / 2 + spread_adjustment
-            ask_spread = max(base_spread / 2 - spread_adjustment, self.min_spread / 2)
+            bid_spread = base_spread / 2 + inventory_adjustment
+            ask_spread = max(base_spread / 2 - inventory_adjustment, self.min_spread / 2)
         else:
-            bid_spread = max(base_spread / 2 - spread_adjustment, self.min_spread / 2)
-            ask_spread = base_spread / 2 + spread_adjustment
+            bid_spread = max(base_spread / 2 - inventory_adjustment, self.min_spread / 2)
+            ask_spread = base_spread / 2 + inventory_adjustment
         
-        bid_price = max(0, reservation_price - bid_spread)
-        ask_price = min(1, reservation_price + ask_spread)
+        # Calculate base total spread (sum of bid_spread + ask_spread)
+        base_total_spread = bid_spread + ask_spread
+        
+        # Cap total spread to min/max limits
+        total_spread = max(self.min_total_spread, min(base_total_spread, self.max_total_spread))
+        
+        # Log if spread was capped
+        if base_total_spread > self.max_total_spread:
+            self.logger.info(f"Capped total spread from {base_total_spread:.4f} to {self.max_total_spread:.4f}")
+        
+        # Recalculate half-spread from capped total
+        half_spread = total_spread / 2
+        
+        # Apply symmetric spread around reservation price
+        # Inventory skew is already handled via reservation_price adjustment
+        bid_price = max(0.01, reservation_price - half_spread)
+        ask_price = min(0.99, reservation_price + half_spread)
+        
+        # Handle one-sided quoting for hard extremes
+        if self.one_sided_quoting:
+            if mid_price < 0.05:
+                # Only post bids (we like being long cheap)
+                ask_price = 1.0  # Set to max to effectively disable
+            elif mid_price > 0.95:
+                # Only post offers (we don't want to be long expensive)
+                bid_price = 0.0  # Set to min to effectively disable
         
         return bid_price, ask_price
 
@@ -380,12 +528,36 @@ class AvellanedaMarketMaker:
         return mid_price + inventory_skew - inventory * dynamic_gamma * (self.sigma**2) * (1 - t/self.T)
 
     def calculate_optimal_spread(self, t: float, inventory: int) -> float:
+        """
+        Calculate optimal half-spread using AS formula with shorter risk horizon
+        δ* ≈ (γσ²(T-t))/2 + (1/γ)*ln(1+γ/k)
+        """
         dynamic_gamma = self.calculate_dynamic_gamma(inventory)
-        base_spread = (dynamic_gamma * (self.sigma**2) * (1 - t/self.T) + 
-                       (2 / dynamic_gamma) * math.log(1 + (dynamic_gamma / self.k)))
+        
+        # Use shorter risk horizon instead of full T-t
+        time_to_expiry = self.T - t
+        risk_horizon = min(time_to_expiry, self.risk_horizon_seconds)
+        
+        # Log risk horizon on first call (to avoid spam)
+        if not hasattr(self, '_risk_horizon_logged'):
+            self.logger.info(f"Using risk horizon: {risk_horizon:.0f} seconds for AS formula (min(time_to_expiry={time_to_expiry:.0f}s, {self.risk_horizon_seconds}s))")
+            self._risk_horizon_logged = True
+        
+        # AS formula: δ* ≈ (γσ²(T-t))/2 + (1/γ)*ln(1+γ/k)
+        term1 = (dynamic_gamma * (self.sigma**2) * risk_horizon) / 2
+        term2 = (1 / dynamic_gamma) * math.log(1 + (dynamic_gamma / self.k))
+        base_spread = term1 + term2
+        
+        # Adjust for inventory (widen when inventory is high)
         position_ratio = abs(inventory) / self.max_position
-        spread_adjustment = 1 - (position_ratio ** 2)
-        return max(base_spread * spread_adjustment * 0.01, self.min_spread)
+        spread_adjustment = 1 + (position_ratio ** 2)  # Widen when inventory is high
+        
+        target_spread = base_spread * spread_adjustment
+        
+        # Clamp to min/max spread
+        target_spread = max(self.min_spread, min(target_spread, self.max_spread))
+        
+        return target_spread
 
     def calculate_dynamic_gamma(self, inventory: int) -> float:
         position_ratio = inventory / self.max_position
@@ -467,6 +639,29 @@ class AvellanedaMarketMaker:
         self.handle_order_side('sell', sell_orders, ask_price, sell_size)
 
     def handle_order_side(self, action: str, orders: List[Dict], desired_price: float, desired_size: int):
+        # Skip if one-sided quoting and this is the disabled side
+        if self.one_sided_quoting:
+            mid_prices = self.api.get_price()
+            mid_price = mid_prices[self.trade_side]
+            if mid_price < 0.05 and action == 'sell':
+                self.logger.info(f"Skipping {action} order due to one-sided quoting (hard extreme, p={mid_price:.2f})")
+                # Cancel any existing orders on this side
+                for order in orders:
+                    try:
+                        self.api.cancel_order(order['order_id'])
+                    except:
+                        pass
+                return
+            elif mid_price > 0.95 and action == 'buy':
+                self.logger.info(f"Skipping {action} order due to one-sided quoting (hard extreme, p={mid_price:.2f})")
+                # Cancel any existing orders on this side
+                for order in orders:
+                    try:
+                        self.api.cancel_order(order['order_id'])
+                    except:
+                        pass
+                return
+        
         keep_order = None
         for order in orders:
             current_price = float(order['yes_price']) / 100 if self.trade_side == 'yes' else float(order['no_price']) / 100
@@ -484,30 +679,63 @@ class AvellanedaMarketMaker:
         if keep_order is None:
             # Get actual market bid/ask prices
             market_data = self.api.get_price()
-            actual_bid = market_data[f"{self.trade_side}_bid"]
-            actual_ask = market_data[f"{self.trade_side}_ask"]
-            mid_price = market_data[self.trade_side]
+            actual_bid = market_data.get(f"{self.trade_side}_bid")
+            actual_ask = market_data.get(f"{self.trade_side}_ask")
+            mid_price = market_data.get(self.trade_side)
             
-            # Check if our order is competitive with actual market prices
-            should_place = False
-            if action == 'buy':
-                # For buy orders, we need to bid at or above the best bid to be competitive
-                if desired_price >= actual_bid:
-                    should_place = True
-                    self.logger.info(f"Buy order competitive: desired {desired_price:.4f} >= best bid {actual_bid:.4f}")
-                else:
-                    self.logger.info(f"Skipped placing buy order. Desired price {desired_price:.4f} is below best bid {actual_bid:.4f}")
+            tick = 0.01  # 1 cent minimum tick
+            
+            # Clamp price to competitive level inside NBBO
+            if actual_bid is None or actual_ask is None:
+                # Empty book - place at desired price but clip to valid range
+                price = max(0.01, min(0.99, desired_price))
+                self.logger.info(f"Empty book: placing {action} order at desired price {price:.4f}")
+            elif action == 'buy':
+                # Don't cross the ask
+                price = min(desired_price, actual_ask - tick)
+                # Be at least one tick better than current best bid if possible
+                price = max(price, actual_bid + tick)
+                
+                # If that would cross the book, skip
+                if price >= actual_ask:
+                    self.logger.info(
+                        f"Skipped buy after clamping (would cross book): "
+                        f"price={price:.4f}, best_bid={actual_bid:.4f}, best_ask={actual_ask:.4f}"
+                    )
+                    return
+                
+                # Log clamping if price changed
+                if abs(price - desired_price) > 0.0001:
+                    self.logger.info(
+                        f"Clamped buy from {desired_price:.4f} to {price:.4f} "
+                        f"(best_bid={actual_bid:.4f}, best_ask={actual_ask:.4f})"
+                    )
             elif action == 'sell':
-                # For sell orders, we need to ask at or below the best ask to be competitive
-                if desired_price <= actual_ask:
-                    should_place = True
-                    self.logger.info(f"Sell order competitive: desired {desired_price:.4f} <= best ask {actual_ask:.4f}")
-                else:
-                    self.logger.info(f"Skipped placing sell order. Desired price {desired_price:.4f} is above best ask {actual_ask:.4f}")
+                # Don't cross the bid
+                price = max(desired_price, actual_bid + tick)
+                # Be at least one tick better than current best ask if possible
+                price = min(price, actual_ask - tick)
+                
+                # If that would cross the book, skip
+                if price <= actual_bid:
+                    self.logger.info(
+                        f"Skipped sell after clamping (would cross book): "
+                        f"price={price:.4f}, best_bid={actual_bid:.4f}, best_ask={actual_ask:.4f}"
+                    )
+                    return
+                
+                # Log clamping if price changed
+                if abs(price - desired_price) > 0.0001:
+                    self.logger.info(
+                        f"Clamped sell from {desired_price:.4f} to {price:.4f} "
+                        f"(best_bid={actual_bid:.4f}, best_ask={actual_ask:.4f})"
+                    )
+            else:
+                price = desired_price
             
-            if should_place:
-                try:
-                    order_id = self.api.place_order(action, self.trade_side, desired_price, desired_size, int(time.time()) + self.order_expiration)
-                    self.logger.info(f"Placed new {action} order. ID: {order_id}, Price: {desired_price:.4f}, Size: {desired_size}")
-                except Exception as e:
-                    self.logger.error(f"Failed to place {action} order: {str(e)}")
+            # Place the order at clamped price
+            try:
+                order_id = self.api.place_order(action, self.trade_side, price, desired_size, int(time.time()) + self.order_expiration)
+                self.logger.info(f"Placed new {action} order. ID: {order_id}, Price: {price:.4f}, Size: {desired_size}")
+            except Exception as e:
+                self.logger.error(f"Failed to place {action} order: {str(e)}")

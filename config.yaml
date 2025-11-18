@@ -244,19 +244,140 @@
 #     inventory_skew_factor: 0.0005
 #   dt: 10.0
 
-KXBTCMINY-80000:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-80000
-    trade_side: "yes"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 2.0  # Changed from 10.0 to 2.0 for faster updates
+# Discovery and Scoring System Configuration
+discovery:
+  model_version: "AS-v1.0"
+  
+  # Number of top markets to generate configs for and trade
+  max_markets_to_trade: 20
+  
+  # Which sides to trade: ['yes'], ['no'], or ['yes', 'no']
+  sides_to_trade:
+    - 'yes'
+    # - 'no'  # Uncomment to also trade NO side
+  
+  # Time-to-expiry windows per category (in hours/days)
+  time_windows:
+    default:
+      min_days: 1
+      max_days: 60
+    sports:
+      min_hours: 1
+      max_days: 7
+    rates:
+      min_days: 1
+      max_days: 90
+    crypto:
+      min_days: 1
+      max_days: 90
+  
+  # Categories to exclude (chronically illiquid)
+  excluded_categories:
+    - "long-tail-politics"
+    - "niche-rankings"
+  
+  # Recent activity filter (softer for scoring, stricter for execution)
+  recent_activity:
+    scoring:
+      min_trades_last_minutes: 0  # Allow if 24h volume is high
+      min_volume_24h_for_bypass: 10000  # If 24h volume > this, allow even with no recent trades
+    execution:
+      min_trades_last_minutes: 15  # Stricter for MM layer
+      throttle_if_no_trades_minutes: 30
+  
+  # Optional: How often to re-run discovery (for future use)
+  # discovery_interval_seconds: 3600  # Re-run every hour
+
+# Scoring weights (normalized features)
+scoring:
+  weights:
+    volume_24h: 0.30
+    recent_volume_1h: 0.25
+    book_liquidity: 0.20
+    spread: -0.15  # Negative because tighter is better
+    time_penalty: -0.10  # Negative because closer expiry is riskier
+  
+  # Volume label bands (based on normalized value)
+  volume_bands:
+    very_low: 0.25
+    low: 0.5
+    medium: 0.75
+    high: 1.0
+  
+  # Minimum volume threshold
+  min_volume_24h: 1000.0
+
+# Risk management
+risk:
+  # Global risk budget
+  global_risk_budget: 10000  # Total dollar exposure across all markets
+  per_market_cap: 2000  # Maximum exposure per market
+  alpha: 0.1  # Scaling factor for sqrt(liquidity) calculation
+  
+  # Category-level caps (for correlated markets)
+  category_caps:
+    crypto: 5000
+    rates: 3000
+    sports: 2000
+    default: 2000
+  
+  # Extra haircuts
+  long_dated_penalty_days: 30  # Markets > this get haircut
+  long_dated_penalty_factor: 0.7
+
+# AS Model parameters
+as_model:
+  # Risk horizon (shorter than expiry for event markets)
+  risk_horizon_seconds: 3600  # 1 hour default
+  
+  # Order intensity parameter k (per category)
+  k_by_category:
+    default: 1.5
+    sports: 2.0
+    rates: 1.2
+    crypto: 1.8
+  
+  # Gamma (risk aversion) - can be per-market based on characteristics
+  base_gamma: 0.1
+  
+  # Spread limits (total spread in dollars)
+  min_total_spread: 0.02  # Minimum total spread to quote
+  max_total_spread: 0.05  # Maximum total spread cap
+  
+  # Sigma estimation
+  sigma:
+    baseline: 0.05
+    use_proxy: true  # Use simple proxy until historical data available
+    cache_ttl_hours: 1
+
+# Extreme price handling
+extreme_prices:
+  normal_band: [0.15, 0.85]
+  soft_extreme_band: [[0.05, 0.15], [0.85, 0.95]]
+  hard_extreme_band: [[0.0, 0.05], [0.95, 1.0]]
+  
+  # Multiplicative haircuts on base max_position
+  soft_extreme_factor: 0.3
+  hard_extreme_factor: 0.1
+  
+  # One-sided quoting for hard extremes
+  hard_extreme_one_sided: true
+
+# Dynamic throttling
+throttling:
+  # Hysteresis: require N consecutive checks before triggering
+  trigger_threshold: 3  # Bad checks needed to trigger
+  recovery_threshold: 5  # Good checks needed to recover
+  
+  # Spread widening
+  max_spread_threshold: 0.20  # If spread > 20¢, throttle
+  spread_widen_ticks: 5  # Widen by 5 ticks when throttled
+  
+  # Book health
+  min_book_depth: 100  # Minimum book depth in contracts
+  book_thin_widen_ticks: 3
+  
+  # Adverse selection detection
+  adverse_selection_window_seconds: 300  # Look back 5 minutes
+  adverse_selection_threshold: 0.7  # If 70% of fills are on wrong side of move
   
