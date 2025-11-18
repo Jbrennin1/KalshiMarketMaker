@@ -188,9 +188,16 @@ class KalshiTradingAPI(AbstractTradingAPI):
         yes_mid_price = round((yes_bid + yes_ask) / 2, 2)
         no_mid_price = round((no_bid + no_ask) / 2, 2)
 
-        self.logger.info(f"Current yes mid-market price: ${yes_mid_price:.2f}")
-        self.logger.info(f"Current no mid-market price: ${no_mid_price:.2f}")
-        return {"yes": yes_mid_price, "no": no_mid_price}
+        self.logger.info(f"Current yes mid-market price: ${yes_mid_price:.2f} (bid: ${yes_bid:.2f}, ask: ${yes_ask:.2f})")
+        self.logger.info(f"Current no mid-market price: ${no_mid_price:.2f} (bid: ${no_bid:.2f}, ask: ${no_ask:.2f})")
+        return {
+            "yes": yes_mid_price,
+            "no": no_mid_price,
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask
+        }
 
     def place_order(self, action: str, side: str, price: float, quantity: int, expiration_ts: int = None) -> str:
         self.logger.info(f"Placing {action} order for {side} side at price ${price:.2f} with quantity {quantity}...")
@@ -309,8 +316,8 @@ class AvellanedaMarketMaker:
             bid_spread = max(base_spread / 2 - spread_adjustment, self.min_spread / 2)
             ask_spread = base_spread / 2 + spread_adjustment
         
-        bid_price = max(0, min(mid_price, reservation_price - bid_spread))
-        ask_price = min(1, max(mid_price, reservation_price + ask_spread))
+        bid_price = max(0, reservation_price - bid_spread)
+        ask_price = min(1, reservation_price + ask_spread)
         
         return bid_price, ask_price
 
@@ -376,15 +383,39 @@ class AvellanedaMarketMaker:
                 self.logger.info(f"Keeping existing {action} order. ID: {order['order_id']}, Price: {current_price:.4f}")
             else:
                 self.logger.info(f"Cancelling extraneous {action} order. ID: {order['order_id']}, Price: {current_price:.4f}")
-                self.api.cancel_order(order['order_id'])
+                try:
+                    self.api.cancel_order(order['order_id'])
+                except Exception as e:
+                    # Order might already be filled or expired
+                    self.logger.debug(f"Could not cancel order {order['order_id']}: {e}")
 
-        current_price = self.api.get_price()[self.trade_side]
         if keep_order is None:
-            if (action == 'buy' and desired_price < current_price) or (action == 'sell' and desired_price > current_price):
+            # Get actual market bid/ask prices
+            market_data = self.api.get_price()
+            actual_bid = market_data[f"{self.trade_side}_bid"]
+            actual_ask = market_data[f"{self.trade_side}_ask"]
+            mid_price = market_data[self.trade_side]
+            
+            # Check if our order is competitive with actual market prices
+            should_place = False
+            if action == 'buy':
+                # For buy orders, we need to bid at or above the best bid to be competitive
+                if desired_price >= actual_bid:
+                    should_place = True
+                    self.logger.info(f"Buy order competitive: desired {desired_price:.4f} >= best bid {actual_bid:.4f}")
+                else:
+                    self.logger.info(f"Skipped placing buy order. Desired price {desired_price:.4f} is below best bid {actual_bid:.4f}")
+            elif action == 'sell':
+                # For sell orders, we need to ask at or below the best ask to be competitive
+                if desired_price <= actual_ask:
+                    should_place = True
+                    self.logger.info(f"Sell order competitive: desired {desired_price:.4f} <= best ask {actual_ask:.4f}")
+                else:
+                    self.logger.info(f"Skipped placing sell order. Desired price {desired_price:.4f} is above best ask {actual_ask:.4f}")
+            
+            if should_place:
                 try:
                     order_id = self.api.place_order(action, self.trade_side, desired_price, desired_size, int(time.time()) + self.order_expiration)
                     self.logger.info(f"Placed new {action} order. ID: {order_id}, Price: {desired_price:.4f}, Size: {desired_size}")
                 except Exception as e:
                     self.logger.error(f"Failed to place {action} order: {str(e)}")
-            else:
-                self.logger.info(f"Skipped placing {action} order. Desired price {desired_price:.4f} does not improve on current price {current_price:.4f}")

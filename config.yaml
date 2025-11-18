@@ -46,39 +46,205 @@
 #     inventory_skew_factor: 0.001
 #   dt: 2.0
 
-KXEPSTEIN-26:
-  api:
-    market_ticker: KXEPSTEIN-26
-    trade_side: "yes"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.001
-    T: 86400
-    min_spread: 0.0
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
+# KXEPSTEIN-26:
+#   api:
+#     market_ticker: KXEPSTEIN-26
+#     trade_side: "yes"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.001
+#     T: 86400
+#     min_spread: 0.0
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
 
-KXEPSTEIN-26-NO:
-  api:
-    market_ticker: KXEPSTEIN-26
-    trade_side: "no"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.001
-    T: 86400
-    min_spread: 0.0
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
+# KXEPSTEIN-26-NO:
+#   api:
+#     market_ticker: KXEPSTEIN-26
+#     trade_side: "no"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.001
+#     T: 86400
+#     min_spread: 0.0
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
 
-  KXBTCMINY-80000:
+#   KXBTCMINY-80000:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-80000
+#     trade_side: "yes"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002  # Slightly higher for crypto volatility
+#     T: 86400
+#     min_spread: 0.01  # 1¢ minimum (good for 2¢ spread market)
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# KXBTCMINY-80000-NO:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-80000
+#     trade_side: "no"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+#   KXBTCMINY-90000:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-90000
+#     trade_side: "yes"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# KXBTCMINY-90000-NO:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-90000
+#     trade_side: "no"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# # Bitcoin Below $80,000 (YES 35¢, NO 66¢) - BEST for market making (already exists, fix indentation)
+# # Fix line 81 - remove extra space at start
+
+# # Bitcoin Below $70,000 (YES 14¢, NO 87¢) - Better for NO side
+# KXBTCMINY-70000:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-70000
+#     trade_side: "yes"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# KXBTCMINY-70000-NO:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-70000
+#     trade_side: "no"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# # Bitcoin Below $60,000 (YES 9¢, NO 95¢) - Better for NO side
+# KXBTCMINY-60000:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-60000
+#     trade_side: "yes"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# KXBTCMINY-60000-NO:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-60000
+#     trade_side: "no"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# # Bitcoin Below $50,000 (YES 5¢, NO 96¢) - Better for NO side
+# KXBTCMINY-50000:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-50000
+#     trade_side: "yes"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+# KXBTCMINY-50000-NO:
+#   api:
+#     market_ticker: KXBTCMINY-25-2-DEC31-50000
+#     trade_side: "no"
+#   market_maker:
+#     max_position: 10
+#     order_expiration: 86400
+#     gamma: 0.1
+#     k: 1.5
+#     sigma: 0.002
+#     T: 86400
+#     min_spread: 0.01
+#     position_limit_buffer: 0.05
+#     inventory_skew_factor: 0.0005
+#   dt: 10.0
+
+KXBTCMINY-80000:
   api:
     market_ticker: KXBTCMINY-25-2-DEC31-80000
     trade_side: "yes"
@@ -87,159 +253,9 @@ KXEPSTEIN-26-NO:
     order_expiration: 86400
     gamma: 0.1
     k: 1.5
-    sigma: 0.002  # Slightly higher for crypto volatility
-    T: 86400
-    min_spread: 0.01  # 1¢ minimum (good for 2¢ spread market)
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-KXBTCMINY-80000-NO:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-80000
-    trade_side: "no"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
     sigma: 0.002
     T: 86400
     min_spread: 0.01
     position_limit_buffer: 0.05
     inventory_skew_factor: 0.0005
-  dt: 10.0
-
-  KXBTCMINY-90000:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-90000
-    trade_side: "yes"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-KXBTCMINY-90000-NO:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-90000
-    trade_side: "no"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-# Bitcoin Below $80,000 (YES 35¢, NO 66¢) - BEST for market making (already exists, fix indentation)
-# Fix line 81 - remove extra space at start
-
-# Bitcoin Below $70,000 (YES 14¢, NO 87¢) - Better for NO side
-KXBTCMINY-70000:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-70000
-    trade_side: "yes"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-KXBTCMINY-70000-NO:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-70000
-    trade_side: "no"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-# Bitcoin Below $60,000 (YES 9¢, NO 95¢) - Better for NO side
-KXBTCMINY-60000:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-60000
-    trade_side: "yes"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-KXBTCMINY-60000-NO:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-60000
-    trade_side: "no"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-# Bitcoin Below $50,000 (YES 5¢, NO 96¢) - Better for NO side
-KXBTCMINY-50000:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-50000
-    trade_side: "yes"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
-
-KXBTCMINY-50000-NO:
-  api:
-    market_ticker: KXBTCMINY-25-2-DEC31-50000
-    trade_side: "no"
-  market_maker:
-    max_position: 10
-    order_expiration: 86400
-    gamma: 0.1
-    k: 1.5
-    sigma: 0.002
-    T: 86400
-    min_spread: 0.01
-    position_limit_buffer: 0.05
-    inventory_skew_factor: 0.0005
-  dt: 10.0
+  dt: 2.0  # Changed from 10.0 to 2.0 for faster updates
