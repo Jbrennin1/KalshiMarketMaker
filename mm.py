@@ -1,6 +1,6 @@
 import abc
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import requests
 import logging
 import uuid
@@ -42,11 +42,15 @@ class KalshiTradingAPI(AbstractTradingAPI):
         market_ticker: str,
         base_url: str,
         logger: logging.Logger,
+        analytics_db: Optional[object] = None,
+        run_id: Optional[int] = None,
     ):
         self.access_key = access_key
         self.market_ticker = market_ticker
         self.logger = logger
         self.base_url = base_url
+        self.analytics_db = analytics_db
+        self.run_id = run_id
         # Extract the path prefix from base_url (e.g., "/trade-api/v2")
         parsed = urlparse(base_url)
         self.path_prefix = parsed.path if parsed.path else "/trade-api/v2"
@@ -224,6 +228,17 @@ class KalshiTradingAPI(AbstractTradingAPI):
             response = self.make_request("POST", path, data=data)
             order_id = response["order"]["order_id"]
             self.logger.info(f"Placed {action} order for {side} side at price ${price:.2f} with quantity {quantity}, order ID: {order_id}")
+            
+            # Log to analytics database
+            if self.analytics_db and self.run_id:
+                try:
+                    # expiration_ts is already in Unix timestamp format if provided
+                    self.analytics_db.log_order_placed(
+                        self.run_id, str(order_id), action, side, price, quantity, expiration_ts
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to log order to analytics: {e}")
+            
             return str(order_id)
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to place order: {e}")
@@ -238,6 +253,14 @@ class KalshiTradingAPI(AbstractTradingAPI):
         response = self.make_request("DELETE", path)
         success = response["reduced_by"] > 0
         self.logger.info(f"Canceled order with ID {order_id}, success: {success}")
+        
+        # Log to analytics database
+        if self.analytics_db and success:
+            try:
+                self.analytics_db.log_order_cancelled(str(order_id))
+            except Exception as e:
+                self.logger.warning(f"Failed to log order cancellation to analytics: {e}")
+        
         return success
 
     def get_orders(self) -> List[Dict]:
@@ -263,7 +286,9 @@ class AvellanedaMarketMaker:
         min_spread: float = 0.01,
         position_limit_buffer: float = 0.1,
         inventory_skew_factor: float = 0.01,
-        trade_side: str = "yes"
+        trade_side: str = "yes",
+        analytics_db: Optional[object] = None,
+        run_id: Optional[int] = None,
     ):
         self.api = api
         self.logger = logger
@@ -277,6 +302,9 @@ class AvellanedaMarketMaker:
         self.position_limit_buffer = position_limit_buffer
         self.inventory_skew_factor = inventory_skew_factor
         self.trade_side = trade_side
+        self.analytics_db = analytics_db
+        self.run_id = run_id
+        self.last_position = None
 
     def run(self, dt: float):
         start_time = time.time()
@@ -296,11 +324,36 @@ class AvellanedaMarketMaker:
             self.logger.info(f"Reservation price: {reservation_price:.4f}")
             self.logger.info(f"Computed desired bid: {bid_price:.4f}, ask: {ask_price:.4f}")
 
+            # Log market snapshot to analytics database
+            if self.analytics_db and self.run_id:
+                try:
+                    self.analytics_db.log_market_snapshot(
+                        self.run_id,
+                        mid_prices,
+                        inventory,
+                        reservation_price,
+                        bid_price,
+                        ask_price
+                    )
+                    # Log position change if it changed
+                    if self.last_position != inventory:
+                        self.analytics_db.log_position(self.run_id, inventory)
+                        self.last_position = inventory
+                except Exception as e:
+                    self.logger.warning(f"Failed to log market snapshot to analytics: {e}")
+
             self.manage_orders(bid_price, ask_price, buy_size, sell_size)
 
             time.sleep(dt)
 
         self.logger.info("Avellaneda market maker finished running")
+        
+        # Mark strategy run as ended
+        if self.analytics_db and self.run_id:
+            try:
+                self.analytics_db.end_strategy_run(self.run_id)
+            except Exception as e:
+                self.logger.warning(f"Failed to end strategy run in analytics: {e}")
 
     def calculate_asymmetric_quotes(self, mid_price: float, inventory: int, t: float) -> Tuple[float, float]:
         reservation_price = self.calculate_reservation_price(mid_price, inventory, t)
@@ -354,6 +407,45 @@ class AvellanedaMarketMaker:
     def manage_orders(self, bid_price: float, ask_price: float, buy_size: int, sell_size: int):
         current_orders = self.api.get_orders()
         self.logger.info(f"Retrieved {len(current_orders)} total orders")
+
+        # Check for order fills
+        if self.analytics_db and self.run_id:
+            try:
+                # Get all orders from database for this run
+                with self.analytics_db.get_connection() as conn:
+                    db_orders = conn.execute("""
+                        SELECT order_id, status, placed_quantity, filled_quantity
+                        FROM orders WHERE run_id = ? AND status = 'placed'
+                    """, (self.run_id,)).fetchall()
+                    
+                    # Check each order to see if it was filled
+                    for db_order in db_orders:
+                        order_id = db_order['order_id']
+                        # Check if order is still in current_orders
+                        found = False
+                        for current_order in current_orders:
+                            if str(current_order.get('order_id')) == str(order_id):
+                                found = True
+                                # Check if order was partially or fully filled
+                                remaining = current_order.get('remaining_count', 0)
+                                placed_qty = db_order['placed_quantity']
+                                if remaining < placed_qty:
+                                    # Order was filled (partially or fully)
+                                    filled_qty = placed_qty - remaining
+                                    # Get fill price from order (use yes_price or no_price)
+                                    fill_price_key = f"{self.trade_side}_price"
+                                    fill_price = float(current_order.get(fill_price_key, 0)) / 100
+                                    if fill_price > 0:
+                                        self.analytics_db.log_order_filled(str(order_id), fill_price, filled_qty)
+                                break
+                        
+                        # If order not found in current orders, it might be fully filled
+                        if not found:
+                            # Try to get order details from API to see if it was filled
+                            # For now, we'll leave it - the order might have been cancelled
+                            pass
+            except Exception as e:
+                self.logger.warning(f"Failed to check order fills: {e}")
 
         buy_orders = []
         sell_orders = []

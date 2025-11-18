@@ -259,3 +259,4 @@ KXBTCMINY-80000:
     position_limit_buffer: 0.05
     inventory_skew_factor: 0.0005
   dt: 2.0  # Changed from 10.0 to 2.0 for faster updates
+  

@@ -1,0 +1,90 @@
+-- Trading Bot Analytics Database Schema
+-- SQLite database schema for tracking market making strategy performance
+
+-- Strategy runs table: Track each strategy execution session
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name TEXT NOT NULL,
+    market_ticker TEXT NOT NULL,
+    trade_side TEXT NOT NULL CHECK(trade_side IN ('yes', 'no')),
+    start_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    end_time TIMESTAMP,
+    config_params TEXT,  -- JSON string storing gamma, k, sigma, T, max_position, etc.
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Market snapshots: Periodic market state snapshots
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    yes_bid REAL,
+    yes_ask REAL,
+    yes_mid REAL,
+    no_bid REAL,
+    no_ask REAL,
+    no_mid REAL,
+    current_position INTEGER NOT NULL,
+    reservation_price REAL,
+    computed_bid REAL,
+    computed_ask REAL,
+    spread REAL,  -- computed_ask - computed_bid
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+);
+
+-- Orders: All order events (placed, filled, cancelled)
+CREATE TABLE IF NOT EXISTS orders (
+    order_id TEXT PRIMARY KEY,  -- UUID from Kalshi
+    run_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('buy', 'sell')),
+    side TEXT NOT NULL CHECK(side IN ('yes', 'no')),
+    placed_price REAL NOT NULL,
+    placed_quantity INTEGER NOT NULL,
+    placed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL DEFAULT 'placed' CHECK(status IN ('placed', 'filled', 'cancelled', 'expired')),
+    filled_price REAL,
+    filled_quantity INTEGER,
+    filled_timestamp TIMESTAMP,
+    cancelled_timestamp TIMESTAMP,
+    expiration_ts TIMESTAMP,
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+);
+
+-- Trades: Completed trades (derived from order fills)
+CREATE TABLE IF NOT EXISTS trades (
+    trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT NOT NULL,
+    run_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('buy', 'sell')),
+    side TEXT NOT NULL CHECK(side IN ('yes', 'no')),
+    price REAL NOT NULL,
+    quantity INTEGER NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    realized_pnl REAL,  -- calculated when position closed
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+);
+
+-- Position history: Position changes over time
+CREATE TABLE IF NOT EXISTS position_history (
+    position_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    position INTEGER NOT NULL,
+    unrealized_pnl REAL,  -- based on current market price
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+);
+
+-- Indexes for better query performance
+CREATE INDEX IF NOT EXISTS idx_market_snapshots_run_id ON market_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_market_snapshots_timestamp ON market_snapshots(timestamp);
+CREATE INDEX IF NOT EXISTS idx_orders_run_id ON orders(run_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_placed_timestamp ON orders(placed_timestamp);
+CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
+CREATE INDEX IF NOT EXISTS idx_position_history_run_id ON position_history(run_id);
+CREATE INDEX IF NOT EXISTS idx_position_history_timestamp ON position_history(timestamp);
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_strategy_name ON strategy_runs(strategy_name);
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_start_time ON strategy_runs(start_time);
+

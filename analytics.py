@@ -1,0 +1,408 @@
+"""
+Analytics module for trading bot - database operations and data collection
+"""
+import sqlite3
+import json
+import logging
+from typing import Dict, Optional, List
+from datetime import datetime
+from contextlib import contextmanager
+import os
+
+
+class AnalyticsDB:
+    """Database manager for trading analytics"""
+    
+    def __init__(self, db_path: str = "trading_analytics.db", logger: Optional[logging.Logger] = None):
+        """
+        Initialize analytics database connection
+        
+        Args:
+            db_path: Path to SQLite database file
+            logger: Optional logger instance
+        """
+        self.db_path = db_path
+        self.logger = logger or logging.getLogger(__name__)
+        self._init_database()
+    
+    def _init_database(self):
+        """Initialize database schema"""
+        schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+        if not os.path.exists(schema_path):
+            # If schema.sql doesn't exist in same directory, try current directory
+            schema_path = "schema.sql"
+        
+        if os.path.exists(schema_path):
+            with open(schema_path, 'r') as f:
+                schema_sql = f.read()
+            
+            with self.get_connection() as conn:
+                conn.executescript(schema_sql)
+                conn.commit()
+            self.logger.info(f"Database schema initialized from {schema_path}")
+        else:
+            self.logger.warning(f"Schema file not found at {schema_path}, creating tables manually")
+            self._create_tables_manual()
+    
+    def _create_tables_manual(self):
+        """Create tables manually if schema.sql is not available"""
+        with self.get_connection() as conn:
+            # Strategy runs
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_runs (
+                    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_name TEXT NOT NULL,
+                    market_ticker TEXT NOT NULL,
+                    trade_side TEXT NOT NULL CHECK(trade_side IN ('yes', 'no')),
+                    start_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    end_time TIMESTAMP,
+                    config_params TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Market snapshots
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS market_snapshots (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    yes_bid REAL, yes_ask REAL, yes_mid REAL,
+                    no_bid REAL, no_ask REAL, no_mid REAL,
+                    current_position INTEGER NOT NULL,
+                    reservation_price REAL,
+                    computed_bid REAL, computed_ask REAL,
+                    spread REAL,
+                    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Orders
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    run_id INTEGER NOT NULL,
+                    action TEXT NOT NULL CHECK(action IN ('buy', 'sell')),
+                    side TEXT NOT NULL CHECK(side IN ('yes', 'no')),
+                    placed_price REAL NOT NULL,
+                    placed_quantity INTEGER NOT NULL,
+                    placed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'placed' CHECK(status IN ('placed', 'filled', 'cancelled', 'expired')),
+                    filled_price REAL, filled_quantity INTEGER, filled_timestamp TIMESTAMP,
+                    cancelled_timestamp TIMESTAMP, expiration_ts TIMESTAMP,
+                    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Trades
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id TEXT NOT NULL,
+                    run_id INTEGER NOT NULL,
+                    action TEXT NOT NULL CHECK(action IN ('buy', 'sell')),
+                    side TEXT NOT NULL CHECK(side IN ('yes', 'no')),
+                    price REAL NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    realized_pnl REAL,
+                    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+                    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Position history
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS position_history (
+                    position_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    position INTEGER NOT NULL,
+                    unrealized_pnl REAL,
+                    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create indexes
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_market_snapshots_run_id ON market_snapshots(run_id)",
+                "CREATE INDEX IF NOT EXISTS idx_market_snapshots_timestamp ON market_snapshots(timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_orders_run_id ON orders(run_id)",
+                "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)",
+                "CREATE INDEX IF NOT EXISTS idx_orders_placed_timestamp ON orders(placed_timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id)",
+                "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_position_history_run_id ON position_history(run_id)",
+                "CREATE INDEX IF NOT EXISTS idx_position_history_timestamp ON position_history(timestamp)",
+            ]:
+                conn.execute(idx_sql)
+            
+            conn.commit()
+            self.logger.info("Database tables created manually")
+    
+    @contextmanager
+    def get_connection(self):
+        """Get database connection with proper cleanup"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"Database error: {e}")
+            raise
+        finally:
+            conn.close()
+    
+    def create_strategy_run(
+        self,
+        strategy_name: str,
+        market_ticker: str,
+        trade_side: str,
+        config_params: Dict
+    ) -> int:
+        """
+        Create a new strategy run and return run_id
+        
+        Args:
+            strategy_name: Name of the strategy
+            market_ticker: Market ticker symbol
+            trade_side: "yes" or "no"
+            config_params: Dictionary of configuration parameters
+            
+        Returns:
+            run_id: The ID of the created run
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO strategy_runs (strategy_name, market_ticker, trade_side, config_params, start_time)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                strategy_name,
+                market_ticker,
+                trade_side,
+                json.dumps(config_params),
+                datetime.now().isoformat()
+            ))
+            conn.commit()
+            run_id = cursor.lastrowid
+            self.logger.debug(f"Created strategy run {run_id} for {strategy_name}")
+            return run_id
+    
+    def end_strategy_run(self, run_id: int):
+        """Mark a strategy run as ended"""
+        with self.get_connection() as conn:
+            conn.execute("""
+                UPDATE strategy_runs
+                SET end_time = ?
+                WHERE run_id = ?
+            """, (datetime.now().isoformat(), run_id))
+            conn.commit()
+            self.logger.debug(f"Ended strategy run {run_id}")
+    
+    def log_market_snapshot(
+        self,
+        run_id: int,
+        market_data: Dict[str, float],
+        position: int,
+        reservation_price: float,
+        computed_bid: float,
+        computed_ask: float
+    ):
+        """
+        Log a market snapshot
+        
+        Args:
+            run_id: Strategy run ID
+            market_data: Dictionary with yes_bid, yes_ask, yes_mid, no_bid, no_ask, no_mid
+            position: Current position
+            reservation_price: Calculated reservation price
+            computed_bid: Computed bid price
+            computed_ask: Computed ask price
+        """
+        spread = computed_ask - computed_bid if computed_ask and computed_bid else None
+        
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO market_snapshots (
+                    run_id, timestamp, yes_bid, yes_ask, yes_mid,
+                    no_bid, no_ask, no_mid, current_position,
+                    reservation_price, computed_bid, computed_ask, spread
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                run_id,
+                datetime.now().isoformat(),
+                market_data.get('yes_bid'),
+                market_data.get('yes_ask'),
+                market_data.get('yes'),
+                market_data.get('no_bid'),
+                market_data.get('no_ask'),
+                market_data.get('no'),
+                position,
+                reservation_price,
+                computed_bid,
+                computed_ask,
+                spread
+            ))
+            conn.commit()
+    
+    def log_order_placed(
+        self,
+        run_id: int,
+        order_id: str,
+        action: str,
+        side: str,
+        price: float,
+        quantity: int,
+        expiration_ts: Optional[int] = None
+    ):
+        """
+        Log an order placement
+        
+        Args:
+            run_id: Strategy run ID
+            order_id: Order ID from exchange
+            action: "buy" or "sell"
+            side: "yes" or "no"
+            price: Order price
+            quantity: Order quantity
+            expiration_ts: Optional expiration timestamp
+        """
+        expiration_dt = None
+        if expiration_ts:
+            expiration_dt = datetime.fromtimestamp(expiration_ts).isoformat()
+        
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO orders (
+                    order_id, run_id, action, side, placed_price,
+                    placed_quantity, placed_timestamp, expiration_ts, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'placed')
+            """, (
+                order_id,
+                run_id,
+                action,
+                side,
+                price,
+                quantity,
+                datetime.now().isoformat(),
+                expiration_dt
+            ))
+            conn.commit()
+            self.logger.debug(f"Logged order placement: {order_id}")
+    
+    def log_order_cancelled(self, order_id: str):
+        """Mark an order as cancelled"""
+        with self.get_connection() as conn:
+            conn.execute("""
+                UPDATE orders
+                SET status = 'cancelled', cancelled_timestamp = ?
+                WHERE order_id = ?
+            """, (datetime.now().isoformat(), order_id))
+            conn.commit()
+            self.logger.debug(f"Logged order cancellation: {order_id}")
+    
+    def log_order_filled(
+        self,
+        order_id: str,
+        filled_price: float,
+        filled_quantity: int
+    ):
+        """
+        Mark an order as filled and create trade record
+        
+        Args:
+            order_id: Order ID
+            filled_price: Price at which order was filled
+            filled_quantity: Quantity filled
+        """
+        with self.get_connection() as conn:
+            # Get order details
+            order = conn.execute("""
+                SELECT run_id, action, side FROM orders WHERE order_id = ?
+            """, (order_id,)).fetchone()
+            
+            if not order:
+                self.logger.warning(f"Order {order_id} not found when logging fill")
+                return
+            
+            run_id, action, side = order['run_id'], order['action'], order['side']
+            
+            # Update order status
+            conn.execute("""
+                UPDATE orders
+                SET status = 'filled',
+                    filled_price = ?,
+                    filled_quantity = ?,
+                    filled_timestamp = ?
+                WHERE order_id = ?
+            """, (
+                filled_price,
+                filled_quantity,
+                datetime.now().isoformat(),
+                order_id
+            ))
+            
+            # Create trade record
+            conn.execute("""
+                INSERT INTO trades (order_id, run_id, action, side, price, quantity, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                order_id,
+                run_id,
+                action,
+                side,
+                filled_price,
+                filled_quantity,
+                datetime.now().isoformat()
+            ))
+            
+            conn.commit()
+            self.logger.debug(f"Logged order fill: {order_id}")
+    
+    def log_position(self, run_id: int, position: int, unrealized_pnl: Optional[float] = None):
+        """Log position change"""
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO position_history (run_id, timestamp, position, unrealized_pnl)
+                VALUES (?, ?, ?, ?)
+            """, (
+                run_id,
+                datetime.now().isoformat(),
+                position,
+                unrealized_pnl
+            ))
+            conn.commit()
+    
+    def check_order_fills(self, run_id: int, current_orders: List[Dict]) -> List[Dict]:
+        """
+        Check for order fills by comparing current orders with database
+        
+        Args:
+            run_id: Strategy run ID
+            current_orders: List of current orders from API
+            
+        Returns:
+            List of filled orders that need to be logged
+        """
+        current_order_ids = {order.get('order_id') for order in current_orders if order.get('order_id')}
+        
+        with self.get_connection() as conn:
+            # Get all placed orders for this run that aren't filled or cancelled
+            db_orders = conn.execute("""
+                SELECT order_id, status FROM orders
+                WHERE run_id = ? AND status = 'placed'
+            """, (run_id,)).fetchall()
+            
+            filled_orders = []
+            for db_order in db_orders:
+                order_id = db_order['order_id']
+                # If order is not in current orders, it might be filled
+                if order_id not in current_order_ids:
+                    # Check if order has fill information in API response
+                    # For now, we'll mark it as potentially filled
+                    # The actual fill detection should be done by checking order status via API
+                    pass
+            
+            return filled_orders
+
