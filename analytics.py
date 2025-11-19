@@ -614,4 +614,94 @@ class AnalyticsDB:
                 markets.append(market)
             
             return markets
+    
+    def log_volatility_event(self, event, run_id: Optional[int] = None):
+        """
+        Log a detected volatility event
+        
+        Args:
+            event: VolatilityEvent object
+            run_id: Optional strategy run ID if session was spawned
+        """
+        from volatility_models import VolatilityEvent
+        
+        if not isinstance(event, VolatilityEvent):
+            self.logger.warning(f"Invalid event type: {type(event)}")
+            return
+        
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO volatility_events (
+                    market_ticker, timestamp, signal_strength, sigma,
+                    volume_multiplier, volume_delta, estimated_trades,
+                    volume_velocity, jump_magnitude, direction, close_time, run_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                event.ticker,
+                event.timestamp.isoformat(),
+                event.signal_strength,
+                event.sigma,
+                event.volume_multiplier,
+                event.volume_delta,
+                event.estimated_trades,
+                event.volume_velocity,
+                event.jump_magnitude,
+                event.direction,
+                event.close_time.isoformat() if event.close_time else None,
+                run_id
+            ))
+            conn.commit()
+            self.logger.debug(f"Logged volatility event: {event.ticker}")
+    
+    def log_volatility_session_end(self, ticker: str, run_id: int, kill_reason: str, final_pnl: Optional[float] = None):
+        """
+        Log the end of a volatility session
+        
+        Args:
+            ticker: Market ticker
+            run_id: Strategy run ID
+            kill_reason: Reason session ended
+            final_pnl: Optional final PnL
+        """
+        with self.get_connection() as conn:
+            # Get event_id from volatility_events table
+            event_row = conn.execute("""
+                SELECT event_id FROM volatility_events
+                WHERE market_ticker = ? AND run_id = ?
+                ORDER BY timestamp DESC LIMIT 1
+            """, (ticker, run_id)).fetchone()
+            
+            event_id = event_row['event_id'] if event_row else None
+            
+            # Calculate final PnL if not provided
+            if final_pnl is None:
+                # Try to calculate from trades
+                trades = conn.execute("""
+                    SELECT SUM(CASE 
+                        WHEN action = 'buy' THEN -price * quantity
+                        WHEN action = 'sell' THEN price * quantity
+                        ELSE 0
+                    END) as pnl
+                    FROM trades WHERE run_id = ?
+                """, (run_id,)).fetchone()
+                final_pnl = trades['pnl'] if trades and trades['pnl'] is not None else 0.0
+            
+            conn.execute("""
+                INSERT INTO volatility_sessions (
+                    event_id, run_id, start_time, end_time, kill_reason, final_pnl
+                ) VALUES (?, ?, 
+                    (SELECT start_time FROM strategy_runs WHERE run_id = ?),
+                    ?,
+                    ?, ?
+                )
+            """, (
+                event_id,
+                run_id,
+                run_id,
+                datetime.now().isoformat(),
+                kill_reason,
+                final_pnl
+            ))
+            conn.commit()
+            self.logger.debug(f"Logged volatility session end: {ticker}, reason: {kill_reason}")
 

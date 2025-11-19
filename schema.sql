@@ -126,3 +126,43 @@ CREATE INDEX IF NOT EXISTS idx_discovered_markets_session_id ON discovered_marke
 CREATE INDEX IF NOT EXISTS idx_discovered_markets_ticker ON discovered_markets(ticker);
 CREATE INDEX IF NOT EXISTS idx_discovered_markets_selected ON discovered_markets(selected_for_trading);
 
+-- Volatility events: Store detected volatility events
+CREATE TABLE IF NOT EXISTS volatility_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_ticker TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    signal_strength REAL,
+    sigma REAL,
+    volume_multiplier REAL,
+    volume_delta REAL,
+    estimated_trades REAL,
+    volume_velocity REAL,
+    price_change REAL,
+    jump_magnitude REAL,
+    direction TEXT,
+    close_time TIMESTAMP,
+    run_id INTEGER,  -- Link to strategy run if session was spawned
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE SET NULL
+);
+
+-- Volatility sessions: Track ephemeral MM sessions
+CREATE TABLE IF NOT EXISTS volatility_sessions (
+    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER,
+    run_id INTEGER NOT NULL,
+    start_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    end_time TIMESTAMP,
+    kill_reason TEXT,  -- expiration, illiquidity, volatility_collapse, ttl, etc.
+    final_pnl REAL,
+    FOREIGN KEY (event_id) REFERENCES volatility_events(event_id) ON DELETE SET NULL,
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+);
+
+-- Indexes for volatility tables
+CREATE INDEX IF NOT EXISTS idx_volatility_events_ticker ON volatility_events(market_ticker);
+CREATE INDEX IF NOT EXISTS idx_volatility_events_timestamp ON volatility_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_volatility_events_run_id ON volatility_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_volatility_sessions_event_id ON volatility_sessions(event_id);
+CREATE INDEX IF NOT EXISTS idx_volatility_sessions_run_id ON volatility_sessions(run_id);
+CREATE INDEX IF NOT EXISTS idx_volatility_sessions_start_time ON volatility_sessions(start_time);
+

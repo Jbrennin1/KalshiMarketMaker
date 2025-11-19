@@ -1,249 +1,3 @@
-# RATECUTCOUNT-24DEC31-T4:
-#   api:
-#     market_ticker: RATECUTCOUNT-24DEC31-T4
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 5
-#     order_expiration: 28800 # 8 hours
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.001
-#     T: 28800 # 8 hours
-#     min_spread: 0.0
-#     position_limit_buffer: 0.1
-#     inventory_skew_factor: 0.001
-#   dt: 2.0
-
-# FEDDECISION-24NOV-C25:
-#   api:
-#     market_ticker: FEDDECISION-24NOV-C25
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 5
-#     order_expiration: 28800 # 8 hours
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.001
-#     T: 28800 # 8 hours
-#     min_spread: 0.0
-#     position_limit_buffer: 0.1
-#     inventory_skew_factor: 0.001
-#   dt: 2.0
-
-# FEDDECISION-24NOV-H0:
-#   api:
-#     market_ticker: FEDDECISION-24NOV-H0
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 5
-#     order_expiration: 28800 # 8 hours
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.001
-#     T: 28800 # 8 hours
-#     min_spread: 0.0
-#     position_limit_buffer: 0.1
-#     inventory_skew_factor: 0.001
-#   dt: 2.0
-
-# KXEPSTEIN-26:
-#   api:
-#     market_ticker: KXEPSTEIN-26
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.001
-#     T: 86400
-#     min_spread: 0.0
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# KXEPSTEIN-26-NO:
-#   api:
-#     market_ticker: KXEPSTEIN-26
-#     trade_side: "no"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.001
-#     T: 86400
-#     min_spread: 0.0
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-#   KXBTCMINY-80000:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-80000
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002  # Slightly higher for crypto volatility
-#     T: 86400
-#     min_spread: 0.01  # 1¢ minimum (good for 2¢ spread market)
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# KXBTCMINY-80000-NO:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-80000
-#     trade_side: "no"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-#   KXBTCMINY-90000:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-90000
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# KXBTCMINY-90000-NO:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-90000
-#     trade_side: "no"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# # Bitcoin Below $80,000 (YES 35¢, NO 66¢) - BEST for market making (already exists, fix indentation)
-# # Fix line 81 - remove extra space at start
-
-# # Bitcoin Below $70,000 (YES 14¢, NO 87¢) - Better for NO side
-# KXBTCMINY-70000:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-70000
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# KXBTCMINY-70000-NO:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-70000
-#     trade_side: "no"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# # Bitcoin Below $60,000 (YES 9¢, NO 95¢) - Better for NO side
-# KXBTCMINY-60000:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-60000
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# KXBTCMINY-60000-NO:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-60000
-#     trade_side: "no"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# # Bitcoin Below $50,000 (YES 5¢, NO 96¢) - Better for NO side
-# KXBTCMINY-50000:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-50000
-#     trade_side: "yes"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
-# KXBTCMINY-50000-NO:
-#   api:
-#     market_ticker: KXBTCMINY-25-2-DEC31-50000
-#     trade_side: "no"
-#   market_maker:
-#     max_position: 10
-#     order_expiration: 86400
-#     gamma: 0.1
-#     k: 1.5
-#     sigma: 0.002
-#     T: 86400
-#     min_spread: 0.01
-#     position_limit_buffer: 0.05
-#     inventory_skew_factor: 0.0005
-#   dt: 10.0
-
 # Discovery and Scoring System Configuration
 discovery:
   model_version: "AS-v1.0"
@@ -380,4 +134,44 @@ throttling:
   # Adverse selection detection
   adverse_selection_window_seconds: 300  # Look back 5 minutes
   adverse_selection_threshold: 0.7  # If 70% of fills are on wrong side of move
+
+# Volatility Scanner Configuration
+volatility_scanner:
+  refresh_interval_seconds: 3  # Round-robin through tracked markets every 3s
+  rolling_window_minutes: 15   # 10-30 min range
+  volatility_window_minutes: 10  # For σ calculation
+  
+  # Volatility thresholds (at least one must pass)
+  price_jump_threshold_cents: 12  # X cents
+  price_jump_window_minutes: 5    # Y minutes
+  sigma_threshold: 0.02           # Minimum σ to trigger
+  
+  # Volume requirements (ALL must pass)
+  volume_burst_multiplier: 2.5    # k multiplier (volume_delta / baseline)
+  volume_baseline_scans: 15       # Number of scans for baseline calculation
+  min_absolute_volume_per_5m: 30  # Minimum contracts traded in 5min window
+  estimated_trade_size: 3         # Average Kalshi trade size (1-10 range, avg ~3-5)
+  min_estimated_trades: 3         # Minimum estimated trades (volume_delta / estimated_trade_size)
+  
+  # Optional: Volume velocity (for faster detection, v1+)
+  volume_velocity_enabled: false  # Enable for lightning-fast detection
+  volume_velocity_threshold: 200  # Contracts per scan increase rate
+  
+  # Liquidity requirements
+  max_time_to_expiry_hours: 24    # T_max
+  min_liquidity_spread: 0.10      # Max spread to consider
+
+# Volatility MM Configuration
+volatility_mm:
+  max_concurrent_sessions: 4
+  session_ttl_minutes: 20
+  spread_cap_tight: 0.03
+  spread_cap_wide: 0.05
+  quote_refresh_seconds: 3        # Faster than default
+  
+  # Minimal guardrails (ONLY THREE)
+  guardrails:
+    expiration_danger_window_seconds: 180  # Stop quoting 3 min before close
+    illiquidity_timeout_seconds: 15        # No trades for 15s = freeze
+    min_volatility_threshold: 0.01        # If vol drops below this, kill session
   

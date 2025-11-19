@@ -69,6 +69,10 @@ def generate_config_for_market(
     """
     Generate config for a market based on its characteristics
     Uses risk-aware sizing, extreme price handling, and estimated sigma
+    
+    This function is used for both discovery-based and volatility-based configs.
+    For volatility configs, the manager will override T (session duration) and dt
+    (quote refresh rate) after calling this function.
     """
     logger = logging.getLogger("DynamicConfig")
     

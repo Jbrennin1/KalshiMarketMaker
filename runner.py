@@ -1,5 +1,6 @@
 import argparse
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 import yaml
 import json
@@ -306,30 +307,64 @@ if __name__ == "__main__":
     # Initialize analytics database
     analytics_db = AnalyticsDB(db_path="trading_analytics.db", logger=main_logger)
     
-    # Step 1: Run discovery and generate configs
-    main_logger.info("Starting discovery phase...")
-    generated_configs = discover_and_generate_configs(full_config, analytics_db)
+    # Initialize API for scanner and manager
+    api = KalshiTradingAPI(
+        access_key=os.getenv("KALSHI_ACCESS_KEY"),
+        private_key=os.getenv("KALSHI_PRIVATE_KEY"),
+        market_ticker="dummy",  # Not used for scanner
+        base_url=os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2"),
+        logger=main_logger
+    )
     
-    if not generated_configs:
-        main_logger.error("No configs generated from discovery. Exiting.")
-        exit(1)
+    # Initialize discovery (used by scanner for market fetching)
+    discovery = MarketDiscovery(api, config=full_config)
     
-    # Step 2: Run MM bot with generated configs
-    main_logger.info(f"Starting MM bot with {len(generated_configs)} generated configs...")
-    print("Starting the following strategies:")
-    for config_name, _ in generated_configs:
-        print(f"- {config_name}")
+    # Initialize volatility scanner
+    from volatility_scanner import VolatilityScanner
+    from vol_mm_manager import VolatilityMMManager
     
-    # Run all strategies in parallel using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=len(generated_configs)) as executor:
-        futures = []
-        for config_name, config in generated_configs:
-            future = executor.submit(run_strategy, config_name, config, full_config)
-            futures.append((config_name, future))
-        
-        # Wait for all strategies to complete and handle errors
-        for config_name, future in futures:
-            try:
-                future.result()  # This will raise any exception that occurred
-            except Exception as e:
-                main_logger.error(f"Strategy {config_name} failed: {e}", exc_info=True)
+    # Create manager first (needed for callbacks)
+    manager = VolatilityMMManager(
+        api=api,
+        discovery=discovery,
+        analytics_db=analytics_db,
+        config=full_config
+    )
+    
+    # Create scanner with callbacks
+    scanner = VolatilityScanner(
+        api=api,
+        discovery=discovery,
+        config=full_config,
+        event_callback=manager.handle_volatility_event,
+        ended_callback=manager.handle_volatility_ended
+    )
+    
+    # Link manager to scanner (for mark_event_ended)
+    manager.scanner = scanner
+    
+    # Start manager and scanner
+    main_logger.info("Starting volatility-driven market making system...")
+    manager.start()
+    scanner.start()
+    
+    main_logger.info("System started. Scanner monitoring markets for volatility events...")
+    main_logger.info("Press Ctrl+C to stop")
+    
+    try:
+        # Main thread sleeps/logs until shutdown
+        while True:
+            time.sleep(60)  # Log status every minute
+            active_sessions = manager.get_active_sessions()
+            main_logger.info(f"Active volatility sessions: {len(active_sessions)}")
+            if active_sessions:
+                for ticker, info in active_sessions.items():
+                    main_logger.info(f"  - {ticker}: started at {info['start_time']}")
+    except KeyboardInterrupt:
+        main_logger.info("Shutting down...")
+    finally:
+        # Cleanup
+        scanner.stop()
+        manager.stop()
+        api.logout()
+        main_logger.info("System stopped")
