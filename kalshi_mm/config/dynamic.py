@@ -1,7 +1,7 @@
 import logging
 import math
 from typing import Dict, Optional
-from market_discovery import MarketDiscovery
+from kalshi_mm.discovery import MarketDiscovery
 
 
 def get_extreme_price_band(mid_price: float, config: Dict) -> str:
@@ -64,7 +64,11 @@ def generate_config_for_market(
     side: str = 'yes',
     discovery: Optional[MarketDiscovery] = None,
     config: Optional[Dict] = None,
-    n_active_markets: int = 1
+    n_active_markets: int = 1,
+    volatility_event: Optional[object] = None,  # VolatilityEvent from volatility_models
+    category_profile: Optional[Dict] = None,  # Category profile from config
+    profile_name: Optional[str] = None,  # Profile name (e.g., 'mean_reverting')
+    regime: Optional[str] = None  # Current market regime
 ) -> Optional[Dict]:
     """
     Generate config for a market based on its characteristics
@@ -104,9 +108,9 @@ def generate_config_for_market(
     # Determine extreme price band
     extreme_band = get_extreme_price_band(mid_price, config)
     
-    # Skip extreme markets entirely - don't generate configs for them
-    if extreme_band in ['soft_extreme', 'hard_extreme']:
-        logger.debug(f"Skipping {ticker}-{side}: extreme price band ({extreme_band}), mid_price={mid_price:.4f}")
+    # Skip only hard extreme markets - soft extremes are tradeable with reduced position sizes
+    if extreme_band == 'hard_extreme':
+        logger.debug(f"Skipping {ticker}-{side}: hard extreme price band, mid_price={mid_price:.4f}")
         return None
     
     # Calculate base max_position from risk budget
@@ -159,6 +163,77 @@ def generate_config_for_market(
         else:
             sigma = 0.001
     
+    # Save estimated sigma before blending
+    sigma_est = sigma
+    
+    # If volatility event provided, blend with estimated sigma using dynamic logic
+    if volatility_event is not None and hasattr(volatility_event, 'sigma') and volatility_event.sigma is not None:
+        event_sigma = volatility_event.sigma
+        cfg_vol = config.get('volatility_mm', {})
+        sigma_cap = cfg_vol.get('sigma_cap', 0.15)
+        sigma_floor = cfg_vol.get('sigma_floor', 0.001)
+        
+        # Dynamic blend weight logic:
+        # 1. If jump >= threshold, ignore event sigma (blend_weight = 0.0)
+        #    Jump-driven sigma explosions should not shrink spreads
+        jump_magnitude = volatility_event.jump_magnitude if hasattr(volatility_event, 'jump_magnitude') else None
+        jump_threshold_cents = cfg_vol.get('jump_magnitude_threshold_cents', 10)
+        
+        # Phase 4.1: Regime-aware sigma blending
+        if jump_magnitude is not None and jump_magnitude >= jump_threshold_cents:
+            # Large jump detected - ignore event sigma to prevent spread shrinkage
+            blend_weight = 0.0
+            logger.info(
+                "Jump detected (magnitude=%0.1fc >= %0.1fc threshold): "
+                "ignoring event sigma to prevent spread shrinkage",
+                jump_magnitude, jump_threshold_cents
+            )
+        elif regime:
+            # Regime-aware blend weight
+            profile_blend = category_profile.get('sigma_blend', 0.5) if category_profile else 0.5
+            if regime == "MEAN_REVERTING":
+                blend_weight = profile_blend
+            elif regime == "QUIET":
+                blend_weight = min(profile_blend, 0.3)  # Less reliance on event sigma
+            elif regime == "TRENDING":
+                blend_weight = min(profile_blend, 0.15)  # Don't shrink spreads
+            else:  # CHAOTIC, NOISE, UNKNOWN
+                blend_weight = 0.0
+            logger.info(
+                "Regime-aware blend weight: %0.2f (regime=%s, profile_blend=%0.2f)",
+                blend_weight, regime, profile_blend
+            )
+        elif category_profile is not None:
+            # Use category profile blend weight (no regime info)
+            blend_weight = category_profile.get('sigma_blend', 0.5)
+            logger.info(
+                "Using category profile blend weight: %0.2f (profile=%s)",
+                blend_weight, profile_name or 'unknown'
+            )
+        else:
+            # Fallback to config default
+            blend_weight = max(0.0, min(1.0, cfg_vol.get('sigma_blend_weight', 0.5)))
+            logger.info("Using default blend weight: %0.2f", blend_weight)
+        
+        # Blend: (1-w) * estimated + w * event
+        blended_sigma = (1 - blend_weight) * sigma_est + blend_weight * event_sigma
+        # Use min_sigma_after_blending if available, otherwise use sigma_floor
+        min_sigma_after_blending = cfg_vol.get('min_sigma_after_blending', sigma_floor)
+        final_min_sigma = max(sigma_floor, min_sigma_after_blending)
+        sigma = max(final_min_sigma, min(blended_sigma, sigma_cap))  # Apply floor and cap
+        
+        logger.info(
+            "Blending sigma: estimated=%0.4f, event=%0.6f, "
+            "blended=%0.4f, final=%0.4f (weight=%0.2f, cap=%0.4f, floor=%0.4f)",
+            sigma_est,
+            event_sigma,
+            blended_sigma,
+            sigma,
+            blend_weight,
+            sigma_cap,
+            sigma_floor,
+        )
+    
     # Get category for k parameter
     if discovery:
         category = discovery.get_category(raw_market)
@@ -167,8 +242,29 @@ def generate_config_for_market(
     
     as_config = config.get('as_model', {})
     k_by_category = as_config.get('k_by_category', {})
-    k = k_by_category.get(category, k_by_category.get('default', 1.5))
+    k_base = k_by_category.get(category, k_by_category.get('default', 1.5))
     base_gamma = as_config.get('base_gamma', 0.1)
+    
+    # Phase 4.2: Regime-aware gamma & k adjustments
+    if regime:
+        regimes_config = config.get('regimes', {})
+        gamma_multipliers = regimes_config.get('gamma_multipliers', {})
+        k_multipliers = regimes_config.get('k_multipliers', {})
+        
+        gamma_mult = gamma_multipliers.get(regime, 1.0)
+        k_mult = k_multipliers.get(regime, 1.0)
+        
+        gamma = base_gamma * gamma_mult
+        k = k_base * k_mult
+        
+        logger.info(
+            "Regime-aware parameters: gamma=%0.3f (base=%0.3f * %0.2f), "
+            "k=%0.2f (base=%0.2f * %0.2f) for regime=%s",
+            gamma, base_gamma, gamma_mult, k, k_base, k_mult, regime
+        )
+    else:
+        gamma = base_gamma
+        k = k_base
     
     # Calculate dynamic inventory_skew_factor (inverse of liquidity/position limit)
     liquidity = raw_market.get('liquidity', 0) / 100  # Convert cents to dollars

@@ -36,8 +36,9 @@ discovery:
       min_trades_last_minutes: 0  # Allow if 24h volume is high
       min_volume_24h_for_bypass: 10000  # If 24h volume > this, allow even with no recent trades
     execution:
-      min_trades_last_minutes: 15  # Stricter for MM layer
+      min_trades_last_minutes: 10  # Stricter for MM layer (softened from 15 for more events)
       throttle_if_no_trades_minutes: 30
+      min_recent_trades_for_event_markets: 3  # Block thin markets from volatility events
   
   # Optional: How often to re-run discovery (for future use)
   # discovery_interval_seconds: 3600  # Re-run every hour
@@ -59,21 +60,21 @@ scoring:
     high: 1.0
   
   # Minimum volume threshold
-  min_volume_24h: 1000.0
+  min_volume_24h: 500.0
 
 # Risk management
 risk:
-  # Global risk budget
-  global_risk_budget: 10000  # Total dollar exposure across all markets
-  per_market_cap: 2000  # Maximum exposure per market
+  # Global risk budget - MORE CONSERVATIVE FOR $100 TEST ACCOUNT
+  global_risk_budget: 60  # Total dollar exposure across all markets (leaves $40 buffer)
+  per_market_cap: 8  # Maximum exposure per market (reduced from 15 to 8 for safer testing - sports drift hard, can scale up later)
   alpha: 0.1  # Scaling factor for sqrt(liquidity) calculation
   
-  # Category-level caps (for correlated markets)
+  # Category-level caps (for correlated markets) - ALL SET TO $8 FOR TESTING
   category_caps:
-    crypto: 5000
-    rates: 3000
-    sports: 2000
-    default: 2000
+    crypto: 8
+    rates: 8
+    sports: 8
+    default: 8
   
   # Extra haircuts
   long_dated_penalty_days: 30  # Markets > this get haircut
@@ -92,11 +93,11 @@ as_model:
     crypto: 1.8
   
   # Gamma (risk aversion) - can be per-market based on characteristics
-  base_gamma: 0.1
+  base_gamma: 0.3  # Increased for better inventory skewing (helps unload positions)
   
   # Spread limits (total spread in dollars)
   min_total_spread: 0.02  # Minimum total spread to quote
-  max_total_spread: 0.05  # Maximum total spread cap
+  max_total_spread: 0.02  # Maximum total spread cap (tightened for sports markets)
   
   # Sigma estimation
   sigma:
@@ -116,6 +117,9 @@ extreme_prices:
   
   # One-sided quoting for hard extremes
   hard_extreme_one_sided: true
+  
+  # Spread shock protection (Kalshi sometimes jumps spread instantly)
+  spread_shock_threshold: 0.15  # Freeze quoting if spread > this threshold
 
 # Dynamic throttling
 throttling:
@@ -126,6 +130,7 @@ throttling:
   # Spread widening
   max_spread_threshold: 0.20  # If spread > 20¢, throttle
   spread_widen_ticks: 5  # Widen by 5 ticks when throttled
+  max_total_widened_spread: 0.15  # Maximum spread after widening (prevents quoting outside allowed cap)
   
   # Book health
   min_book_depth: 100  # Minimum book depth in contracts
@@ -135,43 +140,332 @@ throttling:
   adverse_selection_window_seconds: 300  # Look back 5 minutes
   adverse_selection_threshold: 0.7  # If 70% of fills are on wrong side of move
 
+# Category Profiles - Behavioral classes for different market types
+category_profiles:
+  mean_reverting:
+    # Rates, economic indicators, weather - MM-friendly, mean-reverting
+    sigma_blend: 0.5
+    spread_tight: 0.02
+    spread_wide: 0.04
+    exclude: false
+    by_regime:
+      QUIET:
+        spread_tight: 0.015
+      MEAN_REVERTING:
+        spread_tight: 0.02
+        spread_wide: 0.04
+      TRENDING:
+        exclude: true
+        max_position_factor: 0.3
+      CHAOTIC:
+        exclude: true
+      NOISE:
+        exclude: true
+        max_position_factor: 0.0
+      UNKNOWN:
+        exclude: true
+        max_position_factor: 0.0
+  medium_trending:
+    # Crypto - sometimes directional, sometimes mean-reverting
+    sigma_blend: 0.25
+    spread_tight: 0.03
+    spread_wide: 0.08
+    exclude: false
+    by_regime:
+      MEAN_REVERTING:
+        spread_tight: 0.03
+        sigma_blend: 0.3
+      TRENDING:
+        spread_tight: 0.06
+        spread_wide: 0.12
+        max_position_factor: 0.5
+      CHAOTIC:
+        exclude: true
+      NOISE:
+        exclude: true
+        max_position_factor: 0.0
+      UNKNOWN:
+        exclude: true
+        max_position_factor: 0.0
+  hard_trending:
+    # Sports - directional, toxic to MM (excluded by default)
+    sigma_blend: 0.2
+    spread_tight: 0.10
+    spread_wide: 0.20
+    exclude: true
+    by_regime:
+      TRENDING:
+        exclude: true
+      CHAOTIC:
+        exclude: true
+      NOISE:
+        exclude: true
+        max_position_factor: 0.0
+      UNKNOWN:
+        exclude: true
+        max_position_factor: 0.0
+  low_liquidity:
+    # Entertainment, tech events - low liquidity, wider spreads needed
+    sigma_blend: 0.1
+    spread_tight: 0.04
+    spread_wide: 0.12
+    exclude: false
+    by_regime:
+      TRENDING:
+        exclude: true
+      CHAOTIC:
+        exclude: true
+      NOISE:
+        exclude: true
+        max_position_factor: 0.0
+      UNKNOWN:
+        exclude: true
+        max_position_factor: 0.0
+
+# Category to profile mapping
+category_mapping:
+  rates: mean_reverting
+  economic: mean_reverting
+  crypto: medium_trending
+  sports: hard_trending
+  entertainment: low_liquidity
+  tech: low_liquidity
+  default: mean_reverting
+  fallback: mean_reverting  # Use when category unknown or invalid
+
+# Regime Detection Configuration
+regimes:
+  # Minimum observations before classifying regime
+  min_observations: 5
+  
+  # Drift threshold for trending detection (normalized by volatility)
+  drift_threshold: 0.08
+  drift_normalization_min_sigma: 0.001  # Minimum sigma for drift normalization (prevents division by zero)
+  
+  # Minimum sigma to exit QUIET regime
+  min_sigma_for_regime: 0.01
+  
+  # Mean reversion thresholds
+  mean_reversion_good: 0.6  # Above this = MEAN_REVERTING
+  mean_reversion_bad: 0.4   # Below this = TRENDING (if drift also high)
+  
+  # Depth threshold for CHAOTIC detection
+  depth_threshold: 50.0  # Minimum liquidity to avoid CHAOTIC
+  
+  # Regime stability requirement (N consecutive windows must match)
+  stability_required: 3
+  
+  # NOISE regime detection thresholds
+  noise_spread_min: 0.07  # Minimum spread for NOISE classification
+  noise_spread_max: 0.12  # Maximum spread for NOISE classification
+  
+  # Shared state freshness (for scanner-MM communication)
+  max_shared_state_age_seconds: 4  # MM should freeze if regime data is older than this
+  
+  # Per-profile drift threshold overrides
+  by_profile:
+    mean_reverting:
+      drift_threshold: 0.06
+    medium_trending:
+      drift_threshold: 0.10
+  
+  # Gamma multipliers by regime (adjusts risk aversion)
+  gamma_multipliers:
+    MEAN_REVERTING: 1.0
+    QUIET: 0.8
+    TRENDING: 1.5
+    CHAOTIC: 2.0
+    NOISE: 1.2
+    UNKNOWN: 1.5
+  
+  # k multipliers by regime (adjusts order intensity)
+  k_multipliers:
+    MEAN_REVERTING: 1.0
+    QUIET: 0.7
+    TRENDING: 0.5
+    CHAOTIC: 0.3
+    NOISE: 0.6
+    UNKNOWN: 0.5
+
 # Volatility Scanner Configuration
 volatility_scanner:
-  refresh_interval_seconds: 3  # Round-robin through tracked markets every 3s
+  refresh_interval_seconds: 60  # Metadata validation interval (how often to check market metadata and validate markets)
+  sync_log_interval_seconds: 30  # How often to log aggregated WebSocket sync statistics (event-driven sync logs immediately on warmup exit)
   rolling_window_minutes: 15   # 10-30 min range
   volatility_window_minutes: 10  # For σ calculation
   
   # Volatility thresholds (at least one must pass)
-  price_jump_threshold_cents: 12  # X cents
+  price_jump_threshold_cents: 3  # X cents (lowered from 12 - most moves are 0.5-2c)
   price_jump_window_minutes: 5    # Y minutes
-  sigma_threshold: 0.02           # Minimum σ to trigger
+  sigma_threshold: 0.0075         # Minimum σ to trigger (lowered from 0.02 - more realistic for observed markets)
+  mean_reversion_tolerance_cents: 6  # Max deviation from 3-min mean for sigma-only triggers (0.05-0.06 recommended)
   
-  # Volume requirements (ALL must pass)
-  volume_burst_multiplier: 2.5    # k multiplier (volume_delta / baseline)
-  volume_baseline_scans: 15       # Number of scans for baseline calculation
-  min_absolute_volume_per_5m: 30  # Minimum contracts traded in 5min window
-  estimated_trade_size: 3         # Average Kalshi trade size (1-10 range, avg ~3-5)
-  min_estimated_trades: 3         # Minimum estimated trades (volume_delta / estimated_trade_size)
+  # Categories to exclude from volatility scanning
+  exclude_categories:
+    - sports  # Sports volatility is directional, not mean-reverting - fundamentally incompatible with MM
   
-  # Optional: Volume velocity (for faster detection, v1+)
-  volume_velocity_enabled: false  # Enable for lightning-fast detection
-  volume_velocity_threshold: 200  # Contracts per scan increase rate
+  # Regime filters for event detection
+  regime_filters:
+    allowed_for_events:
+      - MEAN_REVERTING
+      - QUIET
+    disallowed_for_events:
+      - TRENDING
+      - CHAOTIC
+      - NOISE
+      - UNKNOWN
+  
+  # Volume: Simple absolute threshold check (volume_24h from scoring.min_volume_24h)
+  # Note: volume_24h from Kalshi API is only updated the next day (stale data),
+  # so we use simple absolute threshold instead of tracking changes
+  
+  # Phase 4.1: Orderbook configuration
+  orderbook_depth: 10  # Depth levels to fetch for orderbook
+  min_orderbook_levels_required: 1  # Minimum levels required to prevent regime flipping when book temporarily empties
   
   # Liquidity requirements
   max_time_to_expiry_hours: 24    # T_max
   min_liquidity_spread: 0.10      # Max spread to consider
+  
+  # Regime staleness protection
+  regime_staleness_seconds: 4  # MM should freeze if regime timestamp is older than this
 
 # Volatility MM Configuration
 volatility_mm:
-  max_concurrent_sessions: 4
-  session_ttl_minutes: 20
-  spread_cap_tight: 0.03
-  spread_cap_wide: 0.05
+  max_concurrent_sessions: 3  # Reduced from 4 for more conservative first run
+  session_ttl_minutes: 5  # Shortened to 5 min for sports markets (game state changes constantly, must exit before next big line move)
   quote_refresh_seconds: 3        # Faster than default
+  
+  # Exit strategy - passive exit prevents crystallizing losses at worst prices
+  passive_exit: true  # Stop quoting on TTL, keep positions open, close passively
+  ttl_soft_stop: true  # Stop quoting when TTL expires (don't force close)
+  ttl_close_if_small: 2  # Only auto-close if |inventory| < this threshold
+  
+  # Legacy: close_positions_on_exit is now ignored if passive_exit is true
+  close_positions_on_exit: false  # Deprecated - use passive_exit instead
+  
+  # Regime-aware entry conditions
+  allowed_regimes_for_sessions:
+    - MEAN_REVERTING
+    - QUIET
+  require_regime_stability: 3  # Consecutive windows required
+  delay_before_session_start_seconds: 5  # Wait for stable regime before starting
+  
+  # Regime kill switches
+  regime_kill:
+    enabled: true
+    bad_regimes:
+      - TRENDING
+      - CHAOTIC
+    require_adverse_selection: true  # Only kill if also being picked off
+    kill_modes:
+      TRENDING: soft  # Freeze quoting, wait for limit exits
+      CHAOTIC: hard   # Exit immediately
+  
+  # Sigma blending configuration (for volatility event sigma)
+  # Note: Actual blend weight is now dynamic based on jump magnitude, category profile, and regime
+  sigma_blend_weight: 0.5  # Default fallback (overridden by category profiles, jump logic, and regime)
+  sigma_cap: 0.08  # Maximum sigma to use (8%) - start conservative
+  sigma_floor: 0.005  # Minimum sigma to use (0.5%) - Refinement 12: protection against tiny T
+  min_sigma_after_blending: 0.005  # Alias for sigma_floor - minimum sigma after blending (for clarity)
+  
+  # Jump-aware sigma blending
+  jump_magnitude_threshold_cents: 10  # If jump >= this, ignore event sigma (blend_weight = 0.0)
+  
+  # Regime staleness protection
+  regime_stale_kill_seconds: 4  # Hard kill if regime data is stale beyond this threshold
+  
+  # Soft exit timeout
+  soft_exit_max_wait_seconds: 20  # Maximum time to wait in soft exit mode before forcing hard exit
+  
+  # Passive exit slippage tolerance
+  max_slippage_for_limit_exit_cents: 4  # Maximum acceptable slippage for passive limit orders
+  
+  # Session management safety
+  disallow_new_sessions_if_open_positions_exist: true  # Prevent multiple sessions on same ticker if unwinding
+  
+  # Phase 4.1: Balance and margin checks
+  min_available_balance: 100  # Minimum USD balance to open new sessions
+  max_resting_order_value: 10000  # Maximum USD locked in resting orders
+  balance_hysteresis_ratio: 0.85  # Re-enable threshold multiplier
   
   # Minimal guardrails (ONLY THREE)
   guardrails:
     expiration_danger_window_seconds: 180  # Stop quoting 3 min before close
     illiquidity_timeout_seconds: 15        # No trades for 15s = freeze
     min_volatility_threshold: 0.01        # If vol drops below this, kill session
+
+# WebSocket Configuration
+websockets:
+  enabled: true  # Set to true to enable WebSocket real-time updates
+  url: "wss://api.elections.kalshi.com"  # Base URL - /trade-api/ws/v2 will be appended
+  
+  # Connection management
+  reconnect_max_retries: 0  # 0 = infinite
+  reconnect_base_delay_seconds: 0.5
+  reconnect_max_delay_seconds: 5.0
+  ping_interval_seconds: 15  # send ping / expect pong
+  idle_timeout_seconds: 30  # if no messages, consider dead
+  
+  # Subscriptions
+  subscribe_ticker: true
+  subscribe_orderbook: true
+  subscribe_trades: true
+  subscribe_user_fills: true
+  subscribe_positions: true
+  subscribe_lifecycle: true
+  
+  # Backpressure / load control
+  max_markets_per_connection: 1  # Kalshi limit: 1 subscription per channel type per connection
+  max_connections: 20  # Kalshi limit: 20 concurrent connections per user
+  shard_connections: true  # Enable connection sharding to support multiple markets
+  
+  # Staleness thresholds
+  ticker_staleness_seconds: 10
+  orderbook_staleness_seconds: 10
+  position_staleness_seconds: 30
+  
+  # Buffer sizes
+  max_price_history: 1000
+  max_trades_per_ticker: 1000
+  
+  # Health and fallback
+  ws_fallback_on_unhealthy: true  # Fallback to REST if WS unhealthy
+  ws_staleness_freeze_seconds: 5  # Freeze quoting if WS stale >5s
+  ws_staleness_stop_seconds: 15  # Hard stop if WS stale >15s
+
+# Logging configuration
+logging:
+  # Log directory
+  log_dir: "logs"
+  
+  # Main application log
+  main_log:
+    enabled: true
+    level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+    rotation:
+      max_bytes: 10485760  # 10MB
+      backup_count: 5
+  
+  # Component-specific log levels
+  levels:
+    Main: "INFO"
+    VolatilityScanner: "INFO"
+    VolatilityMMManager: "INFO"
+    MarketDiscovery: "INFO"
+    KalshiWebsocketClient: "INFO"  # Set to DEBUG for verbose WS logging
+    MarketStateStore: "INFO"
+  
+  # WebSocket detailed logging (separate file)
+  websocket_log:
+    enabled: false  # Set to true for debugging WebSocket issues
+    level: "DEBUG"
+    rotation:
+      max_bytes: 10485760  # 10MB
+      backup_count: 3
+  
+  # Console output
+  console:
+    enabled: true
+    level: "INFO"  # Usually same or higher than file logs
   

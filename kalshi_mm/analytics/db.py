@@ -27,9 +27,11 @@ class AnalyticsDB:
     
     def _init_database(self):
         """Initialize database schema"""
-        schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+        # Schema is in project root, go up from package directory
+        package_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        schema_path = os.path.join(package_dir, "schema.sql")
         if not os.path.exists(schema_path):
-            # If schema.sql doesn't exist in same directory, try current directory
+            # Fallback: try current directory
             schema_path = "schema.sql"
         
         if os.path.exists(schema_path):
@@ -249,7 +251,11 @@ class AnalyticsDB:
         position: int,
         reservation_price: float,
         computed_bid: float,
-        computed_ask: float
+        computed_ask: float,
+        regime: Optional[str] = None,
+        regime_duration_seconds: Optional[float] = None,
+        prev_regime: Optional[str] = None,
+        regime_transition: bool = False
     ):
         """
         Log a market snapshot
@@ -261,6 +267,10 @@ class AnalyticsDB:
             reservation_price: Calculated reservation price
             computed_bid: Computed bid price
             computed_ask: Computed ask price
+            regime: Current market regime
+            regime_duration_seconds: Time spent in current regime
+            prev_regime: Previous regime before transition
+            regime_transition: Whether this snapshot represents a regime transition
         """
         spread = computed_ask - computed_bid if computed_ask and computed_bid else None
         
@@ -269,8 +279,9 @@ class AnalyticsDB:
                 INSERT INTO market_snapshots (
                     run_id, timestamp, yes_bid, yes_ask, yes_mid,
                     no_bid, no_ask, no_mid, current_position,
-                    reservation_price, computed_bid, computed_ask, spread
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reservation_price, computed_bid, computed_ask, spread,
+                    regime, regime_duration_seconds, prev_regime, regime_transition
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_id,
                 datetime.now().isoformat(),
@@ -284,7 +295,11 @@ class AnalyticsDB:
                 reservation_price,
                 computed_bid,
                 computed_ask,
-                spread
+                spread,
+                regime,
+                regime_duration_seconds,
+                prev_regime,
+                1 if regime_transition else 0
             ))
             conn.commit()
     
@@ -351,17 +366,19 @@ class AnalyticsDB:
         filled_quantity: int
     ):
         """
-        Mark an order as filled and create trade record
+        Mark an order as filled (or partially filled) and create trade record.
+        Handles partial fills by incrementing filled_quantity.
         
         Args:
             order_id: Order ID
-            filled_price: Price at which order was filled
-            filled_quantity: Quantity filled
+            filled_price: Price at which order was filled (weighted average for partial fills)
+            filled_quantity: Additional quantity filled in this event
         """
         with self.get_connection() as conn:
-            # Get order details
+            # Get order details including placed_quantity
             order = conn.execute("""
-                SELECT run_id, action, side FROM orders WHERE order_id = ?
+                SELECT run_id, action, side, placed_quantity, COALESCE(filled_quantity, 0) as current_filled_qty
+                FROM orders WHERE order_id = ?
             """, (order_id,)).fetchone()
             
             if not order:
@@ -369,23 +386,35 @@ class AnalyticsDB:
                 return
             
             run_id, action, side = order['run_id'], order['action'], order['side']
+            placed_quantity = order['placed_quantity']
+            current_filled_qty = order['current_filled_qty']
             
-            # Update order status
+            # Calculate new total filled quantity
+            new_filled_qty = current_filled_qty + filled_quantity
+            
+            # Determine status based on completion
+            if new_filled_qty >= placed_quantity:
+                new_status = 'filled'
+            else:
+                new_status = 'partially_filled'
+            
+            # Update order status - increment filled_quantity, update status and price
             conn.execute("""
                 UPDATE orders
-                SET status = 'filled',
+                SET status = ?,
                     filled_price = ?,
                     filled_quantity = ?,
                     filled_timestamp = ?
                 WHERE order_id = ?
             """, (
-                filled_price,
-                filled_quantity,
+                new_status,
+                filled_price,  # Use latest fill price (could be weighted average in future)
+                new_filled_qty,
                 datetime.now().isoformat(),
                 order_id
             ))
             
-            # Create trade record
+            # Create trade record for this fill event
             conn.execute("""
                 INSERT INTO trades (order_id, run_id, action, side, price, quantity, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -400,7 +429,58 @@ class AnalyticsDB:
             ))
             
             conn.commit()
-            self.logger.debug(f"Logged order fill: {order_id}")
+            self.logger.debug(f"Logged order fill: {order_id}, status={new_status}, total_filled={new_filled_qty}/{placed_quantity}")
+    
+    def log_fill_event(
+        self,
+        fill_id: str,
+        order_id: str,
+        run_id: int,
+        ticker: str,
+        side: str,
+        action: str,
+        count: int,
+        price_cents: int,
+        ts: int
+    ):
+        """
+        Log an individual fill event to order_fills table.
+        Checks for duplicate fill_id before inserting.
+        
+        Args:
+            fill_id: Unique fill ID from Kalshi
+            order_id: Order ID this fill belongs to
+            run_id: Strategy run ID
+            ticker: Market ticker
+            side: 'yes' or 'no'
+            action: 'buy' or 'sell'
+            count: Quantity filled in this event
+            price_cents: Price in cents
+            ts: Unix timestamp in seconds
+        """
+        with self.get_connection() as conn:
+            # Check if fill_id already exists
+            existing = conn.execute(
+                "SELECT 1 FROM order_fills WHERE fill_id = ?",
+                (fill_id,)
+            ).fetchone()
+            
+            if existing:
+                self.logger.debug(f"Fill {fill_id} already logged, skipping")
+                return
+            
+            # Insert fill event
+            conn.execute("""
+                INSERT INTO order_fills (
+                    fill_id, order_id, run_id, ticker, side, action, count, price_cents, ts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                fill_id, order_id, run_id, ticker, side, action, count, price_cents, ts
+            ))
+            
+            conn.commit()
+            self.logger.debug(f"Logged fill event: {fill_id} for order {order_id}")
     
     def log_position(self, run_id: int, position: int, unrealized_pnl: Optional[float] = None):
         """Log position change"""
@@ -617,25 +697,28 @@ class AnalyticsDB:
     
     def log_volatility_event(self, event, run_id: Optional[int] = None):
         """
-        Log a detected volatility event
+        Log a detected volatility event (includes regime if available)
         
         Args:
             event: VolatilityEvent object
             run_id: Optional strategy run ID if session was spawned
         """
-        from volatility_models import VolatilityEvent
+        from kalshi_mm.volatility.models import VolatilityEvent
         
         if not isinstance(event, VolatilityEvent):
             self.logger.warning(f"Invalid event type: {type(event)}")
             return
         
         with self.get_connection() as conn:
+            # Get regime from event if available
+            regime = getattr(event, 'regime', None)
+            
             conn.execute("""
                 INSERT INTO volatility_events (
                     market_ticker, timestamp, signal_strength, sigma,
                     volume_multiplier, volume_delta, estimated_trades,
-                    volume_velocity, jump_magnitude, direction, close_time, run_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    volume_velocity, jump_magnitude, direction, close_time, regime, run_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 event.ticker,
                 event.timestamp.isoformat(),
@@ -648,6 +731,7 @@ class AnalyticsDB:
                 event.jump_magnitude,
                 event.direction,
                 event.close_time.isoformat() if event.close_time else None,
+                regime,
                 run_id
             ))
             conn.commit()

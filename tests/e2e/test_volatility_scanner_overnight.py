@@ -29,10 +29,9 @@ import time
 import yaml
 from datetime import datetime
 from dotenv import load_dotenv
-from mm import KalshiTradingAPI
-from market_discovery import MarketDiscovery
-from volatility_scanner import VolatilityScanner
-from volatility_models import VolatilityEvent, VolatilityEndedEvent
+from kalshi_mm.api import KalshiTradingAPI
+from kalshi_mm.discovery import MarketDiscovery
+from kalshi_mm.volatility import VolatilityScanner, VolatilityEvent, VolatilityEndedEvent
 
 # Load environment variables
 load_dotenv()

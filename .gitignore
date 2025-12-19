@@ -1,9 +1,22 @@
 .env
 
+# Logs
+logs/
 *.log
+data/*.log
 
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 
+# Data files
+data/*.csv
+data/*.db
+data/*.db-journal
 *.txt
 
-*.db
+# Keep data directory structure
+!data/.gitkeep

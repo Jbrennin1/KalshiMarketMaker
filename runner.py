@@ -1,6 +1,7 @@
 import argparse
 import logging
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import yaml
 import json
@@ -8,11 +9,10 @@ from dotenv import load_dotenv
 import os
 from typing import Dict, List, Optional
 
-from mm import KalshiTradingAPI, AvellanedaMarketMaker
-from analytics import AnalyticsDB
-from market_discovery import MarketDiscovery
-from market_scorer import MarketScorer
-from dynamic_config import generate_config_for_market
+from kalshi_mm.api import KalshiTradingAPI, AvellanedaMarketMaker
+from kalshi_mm.analytics import AnalyticsDB
+from kalshi_mm.discovery import MarketDiscovery, MarketScorer
+from kalshi_mm.config import generate_config_for_market
 
 def load_config(config_file):
     with open(config_file, 'r') as f:
@@ -29,7 +29,7 @@ def create_api(api_config, logger, analytics_db=None, run_id=None):
         run_id=run_id,
     )
 
-def create_market_maker(mm_config, api_config, api, logger, analytics_db=None, run_id=None, full_config=None):
+def create_market_maker(mm_config, api_config, api, logger, analytics_db=None, run_id=None, full_config=None, ws_client=None, state_store=None):
     return AvellanedaMarketMaker(
         logger=logger,
         api=api,
@@ -48,6 +48,8 @@ def create_market_maker(mm_config, api_config, api, logger, analytics_db=None, r
         config=full_config,  # Pass full config for throttling settings
         extreme_band=mm_config.get('extreme_band', 'normal'),
         one_sided_quoting=mm_config.get('one_sided_quoting', False),
+        ws_client=ws_client,  # Phase 4.2
+        state_store=state_store,  # Phase 4.2
     )
 
 def run_strategy(config_name: str, config: Dict, full_config: Dict = None):
@@ -80,7 +82,7 @@ def run_strategy(config_name: str, config: Dict, full_config: Dict = None):
         logger.info(f"Model version: {model_version}")
 
     # Initialize analytics database
-    analytics_db = AnalyticsDB(db_path="trading_analytics.db", logger=logger)
+    analytics_db = AnalyticsDB(db_path="data/trading_analytics.db", logger=logger)
     
     # Create strategy run in database
     api_config = config['api']
@@ -283,13 +285,6 @@ def discover_and_generate_configs(config: Dict, analytics_db: AnalyticsDB) -> Li
 
 
 if __name__ == "__main__":
-    # Set up basic logging configuration FIRST (before any loggers are used)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler()]
-    )
-    
     parser = argparse.ArgumentParser(description="Kalshi Market Making Algorithm")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     args = parser.parse_args()
@@ -300,12 +295,13 @@ if __name__ == "__main__":
     # Load environment variables
     load_dotenv()
     
-    # Set up main logger
-    main_logger = logging.getLogger("Main")
-    main_logger.setLevel(logging.INFO)
+    # Set up centralized logging configuration
+    from kalshi_mm.utils.logging_config import setup_logging
+    loggers = setup_logging(config=full_config)
+    main_logger = loggers.get('Main', logging.getLogger("Main"))
     
     # Initialize analytics database
-    analytics_db = AnalyticsDB(db_path="trading_analytics.db", logger=main_logger)
+    analytics_db = AnalyticsDB(db_path="data/trading_analytics.db", logger=main_logger)
     
     # Initialize API for scanner and manager
     api = KalshiTradingAPI(
@@ -316,32 +312,118 @@ if __name__ == "__main__":
         logger=main_logger
     )
     
+    # Phase 4.1: Initialize WebSocket client and state store
+    ws_client = None
+    state_store = None
+    
+    ws_config = full_config.get('websockets', {})
+    if ws_config.get('enabled', False):
+        from kalshi_mm.state import MarketStateStore
+        
+        state_store = MarketStateStore(config=full_config)
+        
+        # Use connection pool if sharding is enabled, otherwise use single client
+        if ws_config.get('shard_connections', False):
+            from kalshi_mm.api.websocket_pool import WebSocketConnectionPool
+            ws_client = WebSocketConnectionPool(
+                access_key=os.getenv("KALSHI_ACCESS_KEY"),
+                private_key_obj=api.private_key_obj,  # Reuse loaded key
+                url=ws_config.get('url', 'wss://api.elections.kalshi.com'),
+                logger=main_logger,
+                config=full_config,
+                state_store=state_store
+            )
+            ws_client.start()
+            
+            # Subscribe to global channels (pool handles subscribing on all connections)
+            if ws_config.get('subscribe_user_fills', True):
+                ws_client.subscribe_user_fills(lambda msg_type, msg:
+                    state_store.add_user_fill(msg))
+                    
+            if ws_config.get('subscribe_positions', True):
+                ws_client.subscribe_positions(lambda msg_type, msg:
+                    state_store.update_position(msg.get('ticker', ''), msg))
+                    
+            if ws_config.get('subscribe_lifecycle', True):
+                ws_client.subscribe_lifecycle(lambda msg_type, msg:
+                    state_store.update_lifecycle(msg.get('ticker', ''), msg))
+        else:
+            from kalshi_mm.api import KalshiWebsocketClient
+            ws_client = KalshiWebsocketClient(
+                access_key=os.getenv("KALSHI_ACCESS_KEY"),
+                private_key_obj=api.private_key_obj,  # Reuse loaded key
+                url=ws_config.get('url', 'wss://api.elections.kalshi.com'),
+                logger=main_logger,
+                config=full_config,
+                state_store=state_store  # Pre-implementation checklist #2
+            )
+            ws_client.connect()
+            
+            # Start receive thread
+            ws_client.start()
+            
+            # Subscribe to global channels
+            if ws_config.get('subscribe_user_fills', True):
+                ws_client.subscribe_user_fills(lambda msg_type, msg:
+                    state_store.add_user_fill(msg))
+                    
+            if ws_config.get('subscribe_positions', True):
+                ws_client.subscribe_positions(lambda msg_type, msg:
+                    state_store.update_position(msg.get('ticker', ''), msg))
+                    
+            if ws_config.get('subscribe_lifecycle', True):
+                ws_client.subscribe_lifecycle(lambda msg_type, msg:
+                    state_store.update_lifecycle(msg.get('ticker', ''), msg))
+        
+        # CRITICAL FIX 3.5: Initial REST snapshot for re-seeding
+        # Re-seed positions
+        try:
+            positions_response = api.make_request("GET", "/portfolio/positions")
+            for pos in positions_response.get("market_positions", []):
+                ticker = pos.get("ticker")
+                if ticker:
+                    state_store.update_position(ticker, pos)
+        except Exception as e:
+            main_logger.warning(f"Could not re-seed positions: {e}")
+        
+        # Re-seed fills (if last_fill_ts is available, use it; otherwise skip)
+        # This will be handled on first reconcile_new_fills() call
+        
+        main_logger.info("WebSocket client initialized and connected")
+    else:
+        main_logger.info("WebSocket disabled in config, using REST-only mode")
+    
     # Initialize discovery (used by scanner for market fetching)
     discovery = MarketDiscovery(api, config=full_config)
     
     # Initialize volatility scanner
-    from volatility_scanner import VolatilityScanner
-    from vol_mm_manager import VolatilityMMManager
+    from kalshi_mm.volatility import VolatilityScanner, VolatilityMMManager
     
-    # Create manager first (needed for callbacks)
-    manager = VolatilityMMManager(
-        api=api,
-        discovery=discovery,
-        analytics_db=analytics_db,
-        config=full_config
-    )
-    
-    # Create scanner with callbacks
+    # Create scanner first (needed for manager)
     scanner = VolatilityScanner(
         api=api,
         discovery=discovery,
         config=full_config,
-        event_callback=manager.handle_volatility_event,
-        ended_callback=manager.handle_volatility_ended
+        event_callback=None,  # Will be set after manager creation
+        ended_callback=None,   # Will be set after manager creation
+        ws_client=ws_client,  # Phase 2.1
+        state_store=state_store  # Phase 2.1
     )
     
-    # Link manager to scanner (for mark_event_ended)
-    manager.scanner = scanner
+    # Create manager with scanner reference
+    manager = VolatilityMMManager(
+        api=api,
+        discovery=discovery,
+        analytics_db=analytics_db,
+        config=full_config,
+        scanner=scanner,
+        ws_client=ws_client,  # Phase 4.2
+        state_store=state_store  # Phase 4.2
+    )
+    
+    # Set callbacks on scanner
+    scanner.event_callback = manager.handle_volatility_event
+    scanner.ended_callback = manager.handle_volatility_ended
     
     # Start manager and scanner
     main_logger.info("Starting volatility-driven market making system...")

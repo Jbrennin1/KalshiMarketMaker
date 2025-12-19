@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     computed_bid REAL,
     computed_ask REAL,
     spread REAL,  -- computed_ask - computed_bid
+    regime TEXT,  -- Current market regime (UNKNOWN, QUIET, MEAN_REVERTING, TRENDING, CHAOTIC, NOISE)
+    regime_duration_seconds REAL,  -- Time spent in current regime
+    prev_regime TEXT,  -- Previous regime before transition
+    regime_transition BOOLEAN DEFAULT 0,  -- Whether this snapshot represents a regime transition
     FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
 );
 
@@ -41,7 +45,7 @@ CREATE TABLE IF NOT EXISTS orders (
     placed_price REAL NOT NULL,
     placed_quantity INTEGER NOT NULL,
     placed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    status TEXT NOT NULL DEFAULT 'placed' CHECK(status IN ('placed', 'filled', 'cancelled', 'expired')),
+    status TEXT NOT NULL DEFAULT 'placed' CHECK(status IN ('placed', 'filled', 'partially_filled', 'cancelled', 'expired')),
     filled_price REAL,
     filled_quantity INTEGER,
     filled_timestamp TIMESTAMP,
@@ -141,6 +145,7 @@ CREATE TABLE IF NOT EXISTS volatility_events (
     jump_magnitude REAL,
     direction TEXT,
     close_time TIMESTAMP,
+    regime TEXT,  -- Market regime when event was detected
     run_id INTEGER,  -- Link to strategy run if session was spawned
     FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE SET NULL
 );
@@ -158,6 +163,21 @@ CREATE TABLE IF NOT EXISTS volatility_sessions (
     FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
 );
 
+-- Order fills: Individual fill events (supports partial fills)
+CREATE TABLE IF NOT EXISTS order_fills (
+    fill_id TEXT PRIMARY KEY,  -- Unique fill ID from Kalshi
+    order_id TEXT NOT NULL,
+    run_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('yes', 'no')),
+    action TEXT NOT NULL CHECK(action IN ('buy', 'sell')),
+    count INTEGER NOT NULL,  -- Quantity filled in this event
+    price_cents INTEGER NOT NULL,  -- Price in cents
+    ts INTEGER NOT NULL,  -- Unix timestamp in seconds
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES strategy_runs(run_id) ON DELETE CASCADE
+);
+
 -- Indexes for volatility tables
 CREATE INDEX IF NOT EXISTS idx_volatility_events_ticker ON volatility_events(market_ticker);
 CREATE INDEX IF NOT EXISTS idx_volatility_events_timestamp ON volatility_events(timestamp);
@@ -165,4 +185,9 @@ CREATE INDEX IF NOT EXISTS idx_volatility_events_run_id ON volatility_events(run
 CREATE INDEX IF NOT EXISTS idx_volatility_sessions_event_id ON volatility_sessions(event_id);
 CREATE INDEX IF NOT EXISTS idx_volatility_sessions_run_id ON volatility_sessions(run_id);
 CREATE INDEX IF NOT EXISTS idx_volatility_sessions_start_time ON volatility_sessions(start_time);
+
+-- Indexes for order_fills table
+CREATE INDEX IF NOT EXISTS idx_order_fills_order_id ON order_fills(order_id);
+CREATE INDEX IF NOT EXISTS idx_order_fills_run_id ON order_fills(run_id);
+CREATE INDEX IF NOT EXISTS idx_order_fills_ts ON order_fills(ts);
 

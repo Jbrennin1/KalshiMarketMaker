@@ -1,7 +1,8 @@
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
-from mm import KalshiTradingAPI
+from kalshi_mm.api import KalshiTradingAPI
+from kalshi_mm.utils import get_price_field, parse_kalshi_timestamp
 
 
 class MarketDiscovery:
@@ -68,8 +69,34 @@ class MarketDiscovery:
     
     def filter_binary_markets(self, markets: List[Dict]) -> List[Dict]:
         """Filter to only binary markets (exclude scalar/combo markets)"""
-        binary = [m for m in markets if m.get('market_type') == 'binary']
-        self.logger.info(f"Filtered to {len(binary)} binary markets")
+        binary = []
+        market_types = {'binary': 0, 'scalar': 0, 'combo': 0, 'unknown': 0}
+        sample_non_binary = []
+        
+        for m in markets:
+            mtype = m.get('market_type', 'unknown')
+            market_types[mtype] = market_types.get(mtype, 0) + 1
+            if mtype == 'binary':
+                binary.append(m)
+            elif len(sample_non_binary) < 5:
+                sample_non_binary.append(m)
+        
+        non_binary_count = len(markets) - len(binary)
+        self.logger.info(
+            f"Market type breakdown: binary={market_types['binary']}, "
+            f"scalar={market_types['scalar']}, combo={market_types['combo']}, "
+            f"unknown={market_types['unknown']}"
+        )
+        self.logger.info(
+            f"Filtered to {len(binary)} binary markets "
+            f"(removed {non_binary_count} non-binary, {non_binary_count/len(markets)*100:.1f}%)"
+        )
+        
+        if sample_non_binary:
+            self.logger.debug("Sample non-binary markets:")
+            for m in sample_non_binary:
+                self.logger.debug(f"  - {m.get('ticker', 'unknown')}: type={m.get('market_type', 'unknown')}")
+        
         return binary
     
     def get_expiry_iso_string(self, market: Dict) -> Optional[str]:
@@ -140,9 +167,35 @@ class MarketDiscovery:
                 return 'crypto'
             elif 'FED' in ticker or 'RATE' in ticker:
                 return 'rates'
-            elif any(sport in ticker for sport in ['NBA', 'NFL', 'MLB', 'NHL']):
+            elif any(sport in ticker for sport in [
+                'NBA', 'NFL', 'MLB', 'NHL', 
+                'EPL', 'EPLGAME', 
+                'NCAAMBGAME', 'NCAA',
+                'SERIEAGAME',  # Serie A soccer
+                'LALIGAGAME',  # La Liga soccer
+                'SB-',  # Super Bowl (pattern: KXSB-26-...)
+            ]):
                 return 'sports'
         return category.lower() if category else 'default'
+    
+    def get_category_profile(self, market: Dict, config: Optional[Dict] = None) -> Tuple[str, Dict]:
+        """
+        Get category profile for a market.
+        
+        Returns:
+            Tuple of (profile_name, profile_dict)
+        """
+        if config is None:
+            config = self.config or {}
+        
+        category = self.get_category(market)
+        category_mapping = config.get('category_mapping', {})
+        profile_name = category_mapping.get(category, category_mapping.get('default', 'mean_reverting'))
+        
+        category_profiles = config.get('category_profiles', {})
+        profile = category_profiles.get(profile_name, category_profiles.get('mean_reverting', {}))
+        
+        return profile_name, profile
     
     def pre_filter_markets(self, markets: List[Dict]) -> List[Dict]:
         """
@@ -189,11 +242,11 @@ class MarketDiscovery:
             
             # Check extreme price bands - skip soft_extreme and hard_extreme markets
             try:
-                # Calculate mid price from bid/ask
-                yes_bid = market.get('yes_bid', 0) / 100 if market.get('yes_bid') else 0
-                yes_ask = market.get('yes_ask', 0) / 100 if market.get('yes_ask') else 0
-                no_bid = market.get('no_bid', 0) / 100 if market.get('no_bid') else 0
-                no_ask = market.get('no_ask', 0) / 100 if market.get('no_ask') else 0
+                # Phase 1.2: Use get_price_field() utility
+                yes_bid = get_price_field(market, 'yes_bid') or 0.0
+                yes_ask = get_price_field(market, 'yes_ask') or 0.0
+                no_bid = get_price_field(market, 'no_bid') or 0.0
+                no_ask = get_price_field(market, 'no_ask') or 0.0
                 
                 # Use yes side mid price (or no side if yes not available)
                 if yes_bid > 0 and yes_ask > 0:
@@ -206,7 +259,7 @@ class MarketDiscovery:
                 
                 if mid_price is not None:
                     # Local import to avoid circular dependency
-                    from dynamic_config import get_extreme_price_band
+                    from kalshi_mm.config import get_extreme_price_band
                     extreme_band = get_extreme_price_band(mid_price, self.config)
                     if extreme_band in ['soft_extreme', 'hard_extreme']:
                         skipped_reasons['extreme_price'] += 1
@@ -219,7 +272,7 @@ class MarketDiscovery:
             time_to_expiry = self.get_time_to_expiry_days(market)
             if time_to_expiry is None:
                 # If we can't determine expiry, still allow if volume is decent
-                volume_24h = market.get('volume_24h', 0) / 100
+                volume_24h = get_price_field(market, 'volume_24h') or 0.0
                 if volume_24h < 1000:  # Require at least $1k volume if no expiry info
                     skipped_reasons['no_expiry'] += 1
                     continue
@@ -239,7 +292,8 @@ class MarketDiscovery:
                 continue
             
             # Check recent activity (softer for scoring)
-            volume_24h = market.get('volume_24h', 0) / 100  # Convert cents to dollars
+            # Phase 1.2: Use get_price_field() utility
+            volume_24h = get_price_field(market, 'volume_24h') or 0.0
             min_volume_for_bypass = recent_activity.get('min_volume_24h_for_bypass', 10000)
             
             # If 24h volume is high enough, allow even with no recent trades
@@ -248,13 +302,17 @@ class MarketDiscovery:
                 continue
             
             # Otherwise, check last trade timestamp if available
+            # Phase 1.1: Use parse_kalshi_timestamp() utility
             last_trade_ts = market.get('last_trade_ts')
             if last_trade_ts:
-                # Handle milliseconds
-                if last_trade_ts > 1e10:
-                    last_trade_ts = last_trade_ts / 1000
-                last_trade_dt = datetime.fromtimestamp(last_trade_ts)
-                minutes_since_trade = (datetime.now() - last_trade_dt).total_seconds() / 60
+                last_trade_dt = parse_kalshi_timestamp(last_trade_ts)
+                if last_trade_dt:
+                    if last_trade_dt.tzinfo is None:
+                        last_trade_dt = last_trade_dt.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    minutes_since_trade = (now - last_trade_dt).total_seconds() / 60
+                else:
+                    minutes_since_trade = None
                 min_trades_minutes = recent_activity.get('min_trades_last_minutes', 0)
                 if minutes_since_trade <= min_trades_minutes:
                     filtered.append(market)

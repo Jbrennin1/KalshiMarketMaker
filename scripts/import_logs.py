@@ -9,13 +9,13 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import json
 
-from analytics import AnalyticsDB
+from kalshi_mm.analytics import AnalyticsDB
 
 
 class LogImporter:
     """Import data from log files into analytics database"""
     
-    def __init__(self, db_path: str = "trading_analytics.db"):
+    def __init__(self, db_path: str = "data/trading_analytics.db"):
         self.analytics_db = AnalyticsDB(db_path=db_path)
         self.logger = logging.getLogger(__name__)
     
@@ -262,7 +262,7 @@ def main():
     parser.add_argument("--market-ticker", required=True, help="Market ticker symbol")
     parser.add_argument("--trade-side", choices=['yes', 'no'], required=True, help="Trade side")
     parser.add_argument("--config", help="Path to config file to extract parameters (optional)")
-    parser.add_argument("--db", default="trading_analytics.db", help="Database path")
+    parser.add_argument("--db", default="data/trading_analytics.db", help="Database path")
     
     args = parser.parse_args()
     

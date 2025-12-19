@@ -19,7 +19,7 @@ import logging
 import os
 import time
 from dotenv import load_dotenv
-from mm import KalshiTradingAPI
+from kalshi_mm.api import KalshiTradingAPI
 
 # Load environment variables
 load_dotenv()

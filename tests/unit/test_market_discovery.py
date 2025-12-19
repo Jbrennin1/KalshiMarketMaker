@@ -8,10 +8,9 @@ import logging
 import os
 import yaml
 from dotenv import load_dotenv
-from mm import KalshiTradingAPI
-from market_discovery import MarketDiscovery
-from market_scorer import MarketScorer
-from dynamic_config import generate_config_for_market
+from kalshi_mm.api import KalshiTradingAPI
+from kalshi_mm.discovery import MarketDiscovery, MarketScorer
+from kalshi_mm.config import generate_config_for_market
 
 # Load environment variables
 load_dotenv()

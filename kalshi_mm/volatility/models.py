@@ -1,9 +1,10 @@
 """
 Data models for volatility-driven market making system
 """
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, Deque
 from datetime import datetime
+from collections import deque
 
 
 @dataclass
@@ -19,6 +20,19 @@ class MarketState:
     close_time: Optional[datetime]  # Market close time
     last_activity_time: datetime  # Last time we fetched this market
     
+    # Regime detection fields (using fixed-length ring buffers to prevent unbounded growth)
+    returns: Deque[float] = field(default_factory=lambda: deque(maxlen=100))  # Fixed-length ring buffer
+    jump_count: int = 0  # Number of jumps > threshold in window
+    mean_reversion_score: float = 0.0  # Fraction of moves that reverted (0-1)
+    order_flow_imbalance: float = 0.0  # Approximate buy/sell imbalance
+    avg_spread: float = 0.0  # Average spread over window
+    max_spread: float = 0.0  # Maximum spread over window
+    avg_depth: float = 0.0  # Average book depth/liquidity
+    regime: Optional[str] = None  # Current regime classification
+    drift_score: float = 0.0  # Cumulative return over window (normalized by volatility)
+    regime_history: Deque[str] = field(default_factory=lambda: deque(maxlen=10))  # Last N regime classifications for stability check
+    regime_timestamp: Optional[datetime] = None  # When regime was last updated
+    
     def __post_init__(self):
         """Initialize empty lists if None"""
         if self.mid_prices is None:
@@ -32,11 +46,12 @@ class MarketState:
         if self.timestamps is None:
             self.timestamps = []
     
-    def add_snapshot(self, mid_price: float, volume_delta: float, spread: float, 
+    def add_snapshot(self, mid_price: float, spread: float, 
                      liquidity: float, timestamp: datetime):
         """Add a new snapshot to the rolling state"""
         self.mid_prices.append(mid_price)
-        self.volume_deltas.append(volume_delta)
+        # volume_deltas list kept for backward compatibility but not populated
+        # (volume_24h is stale, using absolute threshold instead)
         self.spreads.append(spread)
         self.liquidity_values.append(liquidity)
         self.timestamps.append(timestamp)
@@ -56,7 +71,10 @@ class MarketState:
         
         if valid_indices:
             self.mid_prices = [self.mid_prices[i] for i in valid_indices]
-            self.volume_deltas = [self.volume_deltas[i] for i in valid_indices]
+            # volume_deltas is kept for backward compatibility but not populated
+            # Only trim if it has data (should be empty in normal operation)
+            if len(self.volume_deltas) > 0:
+                self.volume_deltas = [self.volume_deltas[i] for i in valid_indices if i < len(self.volume_deltas)]
             self.spreads = [self.spreads[i] for i in valid_indices]
             self.liquidity_values = [self.liquidity_values[i] for i in valid_indices]
             self.timestamps = [self.timestamps[i] for i in valid_indices]
@@ -64,7 +82,9 @@ class MarketState:
             # If no data in window, keep at least the most recent
             if self.mid_prices:
                 self.mid_prices = [self.mid_prices[-1]]
-                self.volume_deltas = [self.volume_deltas[-1]]
+                # volume_deltas is kept for backward compatibility but not populated
+                if len(self.volume_deltas) > 0:
+                    self.volume_deltas = [self.volume_deltas[-1]]
                 self.spreads = [self.spreads[-1]]
                 self.liquidity_values = [self.liquidity_values[-1]]
                 self.timestamps = [self.timestamps[-1]]
@@ -77,13 +97,14 @@ class VolatilityEvent:
     timestamp: datetime
     jump_magnitude: Optional[float]  # Price jump in cents
     sigma: float  # Realized volatility
-    volume_multiplier: float  # volume_delta / baseline_volume
-    volume_delta: float  # Absolute volume delta
-    estimated_trades: float  # volume_delta / estimated_trade_size
-    volume_velocity: Optional[float]  # Optional: rate of volume increase
+    volume_multiplier: float  # DEPRECATED: volume_24h is stale (updated next day), always 0.0
+    volume_delta: float  # DEPRECATED: volume_24h is stale (updated next day), always 0.0
+    estimated_trades: float  # DEPRECATED: derived from volume_delta, always 0.0
+    volume_velocity: Optional[float]  # DEPRECATED: volume_24h is stale, disabled
     close_time: Optional[datetime]  # Market close time
     direction: Optional[str]  # Optional: 'up' or 'down' based on price trend
     signal_strength: float  # Combined signal strength (0-1)
+    regime: str  # Current market regime (UNKNOWN, QUIET, MEAN_REVERTING, TRENDING, CHAOTIC, NOISE)
     
     def to_dict(self) -> dict:
         """Convert to dictionary for logging"""
@@ -98,7 +119,8 @@ class VolatilityEvent:
             'volume_velocity': self.volume_velocity,
             'close_time': self.close_time.isoformat() if self.close_time else None,
             'direction': self.direction,
-            'signal_strength': self.signal_strength
+            'signal_strength': self.signal_strength,
+            'regime': self.regime
         }
 
 

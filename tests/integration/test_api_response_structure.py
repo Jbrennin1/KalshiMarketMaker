@@ -18,8 +18,8 @@ import logging
 import os
 from collections import defaultdict
 from dotenv import load_dotenv
-from mm import KalshiTradingAPI
-from market_discovery import MarketDiscovery
+from kalshi_mm.api import KalshiTradingAPI
+from kalshi_mm.discovery import MarketDiscovery
 
 # Load environment variables
 load_dotenv()

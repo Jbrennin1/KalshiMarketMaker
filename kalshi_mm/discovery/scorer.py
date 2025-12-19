@@ -1,6 +1,6 @@
 import logging
 from typing import List, Dict, Optional
-from market_discovery import MarketDiscovery
+from kalshi_mm.discovery.discovery import MarketDiscovery
 
 
 class MarketScorer:
